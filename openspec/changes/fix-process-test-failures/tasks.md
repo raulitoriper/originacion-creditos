@@ -1,0 +1,162 @@
+# Tasks: fix-process-test-failures
+
+## Review Workload Forecast
+
+| Archivo | Acción | Líneas est. |
+|---|---|---|
+| `src/test/java/.../support/ProcessDiagnostics.java` | Crear | ~120 |
+| `src/test/java/.../CreditOriginationProcessTest.java` | Modificar | ~30 |
+| `src/test/resources/application-test.yaml` | Modificar | ~3 |
+| **Fase A, total** | | **~153** |
+| Fase B | Contingente (área definida por el volcado) | 40-200 |
+
+Decision needed before apply: Yes
+Chained PRs recommended: Yes
+Chain strategy: stacked-to-main
+400-line budget risk: Low
+
+Nota: la cadena no es por tamaño (Fase A ya está bajo presupuesto). Es por secuencia obligatoria:
+Fase B no puede escribirse hasta leer el run real de Fase A. `delivery_strategy: ask-always` exige
+confirmar con el usuario la estrategia de cadena antes de aplicar, aunque el riesgo de tamaño sea bajo.
+
+### Suggested Work Units
+
+| Unit | Goal | Likely PR | Focused test command | Runtime harness | Rollback boundary |
+|---|---|---|---|---|---|
+| 1 | Fase A: instrumentación diagnóstica de solo lectura | PR1 → main | `mvn -B test-compile` (local) | Run de CI de `CreditOriginationProcessTest` — Docker-bloqueado localmente, CI-only | `git revert` del commit único; toca solo `src/test/**` y `application-test.yaml` |
+| 2 | Fase B: corrección en el área que indique la tabla de decisión | PR2, base = main tras merge de PR1 | `mvn -B test-compile` (local) | Run de CI esperando 58/58 y `conclusion=success` — CI-only | `git revert` del commit del fix; sin migración de motor |
+
+## Phase 1: Fase A — Instrumentación de diagnóstico (test scope, PR1)
+
+- [x] 1.1 Crear `ProcessDiagnostics.java`: helper estático, sin Spring, recibe `ZeebeClient` autowired por parámetro. Dos disparos (T1 inmediato, T2 tras `Thread.sleep(Duration.ofSeconds(3))`); 5 secciones (`INSTANCE`, `ELEMENTS`, `INCIDENTS`, `EXPECTED`, `AGGREGATE`) entre marcadores `DIAG BEGIN/END`, líneas `DIAG |`. Nunca lanza: envuelve todo, falla imprime `DIAG-ERROR`. Trampa de compilación: query `FlownodeInstanceQuery`, respuesta `FlowNodeInstance` (capitalización distinta); no existe `VariableQuery`/`search.response.Variable` en 8.7.6, no depender de eso. (Spec: Volcado diagnóstico de Fase A). Verificable: solo local por compilación.
+- [x] 1.2 Modificar `CreditOriginationProcessTest.java`: registrar la key en `processInstanceKeyOf()` (línea 187); agregar `@AfterEach void dumpDiagnostics(TestInfo)` que invoca `ProcessDiagnostics.dump(...)` por key con ids esperados y estado del agregado vía `FindCreditApplicationUseCase` ya autowired. Sin cambios a ids ni aserciones existentes. (Spec: Volcado diagnóstico de Fase A). Verificable: solo local por compilación.
+- [x] 1.3 Modificar `application-test.yaml`: agregar `io.camunda.process.test: DEBUG` y `io.camunda.zeebe.spring.client.jobhandling: DEBUG`; conservar `io.camunda: WARN` sin cambios. (Spec: Log del motor en DEBUG durante tests). Verificable: local por inspección.
+
+## Phase 2: Compuerta de verificación local (obligatoria antes de push)
+
+- [x] 2.1 Ejecutar `export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" && "C:/Users/rriveros/scoop/apps/maven/current/bin/mvn.cmd" -B test-compile`; confirmar sin errores. (Spec: Verificación asimétrica). Verificable: 100% local.
+- [ ] 2.2 Si falla por nombres no verificados (`newFlownodeInstanceQuery()`, forma `filter(...).send().join().items()`, accessors), corregir contra el jar real, prestando atención a la asimetría `Flownode`/`FlowNode`, y repetir 2.1. (Spec: Verificación asimétrica). Verificable: 100% local. **No aplicó**: 2.1 compiló sin errores en el primer intento (los nombres se verificaron con `javap` contra el jar real antes de escribir el código, ver apply-progress).
+
+## Phase 3: Fase A — Verificación de CI (PR1, CI-only)
+
+- [ ] 3.1 Abrir PR1; confirmar por `git diff --stat` que solo toca `src/test/**`. (Spec: Prohibiciones). Verificable: local.
+- [ ] 3.2 Disparar el run de CI y registrar su URL. (Spec: Verificación asimétrica). Verificable: CI-only.
+- [ ] 3.3 Leer el log: confirmar `BUILD FAILURE`, mismas 2 fallas y elementos ausentes que `75e3776`. Si reporta `conclusion=success`, descartar la corrida como evidencia y no avanzar. (Spec: Fase A no debe alterar el resultado medido). Verificable: CI-only.
+- [ ] 3.4 Leer qué emitió `CamundaProcessTestResultPrinter`/`CamundaProcessTestResultCollector` en el mismo run y registrar si duplicó variables/incidentes ya cubiertos por los bloques `DIAG`. (Spec: Volcado diagnóstico de Fase A). Verificable: CI-only.
+- [ ] 3.5 Clasificar cada una de las 2 fallas contra la tabla de decisión (Diseño Decisión 6), de arriba hacia abajo, primera coincidencia gana; registrar fila y área del fix. (Spec: Corrección de Fase B guiada por la tabla de decisión). Verificable: CI-only.
+
+## Phase 4: Fase B — Corrección contingente (PR2, solo tras leer 3.5)
+
+- [x] 4.1 Implementar el fix únicamente en el área que indicó 3.5; no presuponer causa ni empezar antes de tener esa clasificación. (Spec: Corrección de Fase B guiada por la tabla de decisión). Verificable: local (compilación) + CI (comportamiento). **Clasificación** (a partir del run PR1/`0de59c1`, sección `AGGREGATE`: `REVERTED` con ambos ids nulos y `DISBURSED` con `disbursementId` real en las 4 instancias — el proceso terminó correctamente en los 4 escenarios): fila "COMPLETED con timestamp anterior a la falla" (tabla de decisión de `spec.md`) / fila 1 de `design.md` Decisión 6 ("`ELEMENTS` de T1 no contiene el sufijo y `ELEMENTS` de T2 sí" — patrón consistente con lo observado). Área del fix: estrategia de aserción del test, no el modelo. Local (compilación): confirmado. CI (comportamiento): **no verificable en este batch**, ver Phase 4.5/4.6.
+- [x] 4.2 Fila aplicable: "timestamp anterior a la falla". Ajustado solo cómo y cuándo observa el test: `CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20))` en un `@BeforeAll` de `CreditOriginationProcessTest`, verificado con `javap` contra `camunda-process-test-java-8.7.6.jar` antes de escribir el código (`setAssertionTimeout` invoca `Awaitility.setDefaultTimeout`; default `DEFAULT_ASSERTION_TIMEOUT` = 10 s; confirmado que `CamundaProcessTestExecutionListener` no resetea ese valor entre tests, solo `CamundaAssert.initialize`/`reset` del data source). Mismos ids, misma severidad de asercion, BPMN sin tocar. (Spec: Corrección de Fase B guiada por la tabla de decisión). Verificable: local (compilación, hecho) + CI (comportamiento — **CI-only, no verificable aquí**).
+
+### Diagnóstico ronda 2 (revisión de 4.1/4.2 — el CI refutó la hipótesis de timeout)
+
+El run 30466947115 (commit `466c6d5`) ejecutó el timeout de 20 s de 4.2 en CI real: `conclusion=failure`,
+mismas 2 fallas, mismos elementos ausentes, 255 s de duración. La clasificación de 4.1 ("COMPLETED con
+timestamp anterior a la falla") queda **refutada por evidencia de CI**, no solo por hipótesis. Refutación
+adicional por bytecode (`javap` contra los jars reales): ni `CamundaProcessTestExecutionListener` ni
+`CamundaAssert.reset()` invocan `setAssertionTimeout` o `Awaitility` en ningún punto — `reset()` solo hace
+`DATA_SOURCE.remove()` sobre un `ThreadLocal`. El timeout de 20 s SÍ estuvo vigente durante todo el run y no
+cambió nada: esto **no es un problema de tiempo/espera**. La causa real sigue sin conocerse.
+
+- [x] 4.1r2 Extender `ProcessDiagnostics` para volcar `INSTANCE` (estado de la instancia, versión,
+      fechas), `ELEMENTS` (TODOS los flow node instances devueltos, sin filtrar contra ids
+      esperados — id, estado, fechas, flag de incidente) y `VARIABLES`, leyendo desde
+      `io.camunda.process.test.impl.assertions.CamundaDataSource` — la misma clase interna que usa
+      `CamundaAssert` para resolver sus propias aserciones. Accessors de `ProcessInstanceDto`,
+      `FlowNodeInstanceDto` y `VariableDto` verificados con `javap` contra el jar real antes de
+      escribir el código. Se conserva `AGGREGATE` sin cambios. Dependencia deliberada y temporal de
+      paquetes `impl` (API interna del jar de CPT, sin garantía de compatibilidad) — documentado en
+      el Javadoc de la clase como no permanente. (Spec: Volcado diagnóstico de Fase A, extendido).
+      Verificable: local por compilación.
+- [x] 4.2r2 Conectar la dirección REST del broker (`CamundaProcessTestContext.getCamundaRestAddress()`,
+      ya autowired como `processTestContext`) al `dump(...)` de `ProcessDiagnostics` para construir el
+      `CamundaDataSource` de solo lectura. Verificable: local por compilación.
+- [x] 4.3r2 Agregar `@AfterAll restoreAssertionTimeout()` en `CreditOriginationProcessTest` que llama
+      `CamundaAssert.setAssertionTimeout(CamundaAssert.DEFAULT_ASSERTION_TIMEOUT)`. Cierra el hallazgo
+      de dos lentes de revisión: `setAssertionTimeout` muta un default global de Awaitility sin reset,
+      y `pom.xml` no tiene override de fork de surefire, así que `reuseForks=true` (por defecto)
+      aplica y el valor mutado sobreviviría entre clases de test en el mismo fork. Verificable: local
+      por compilación.
+- [x] 4.4r2 Corregir el comentario de `configureAssertionTimeout()`: ya no afirma que el volcado de
+      Fase A "confirmó el patrón ausente en T1 / presente en T2" (nunca se midió — las consultas de
+      elementos devolvían 401 en ambos disparos — y es además incorrecto: el timeout estuvo vigente y
+      no cambió nada). Reescrito para decir que el timeout se probó, se refutó como causa por
+      evidencia de CI y por bytecode, y se conserva solo a la espera del arreglo real. Verificable:
+      local por inspección.
+- [x] 4.5r2 Compuerta local: `mvn -B test-compile` → `BUILD SUCCESS` primer intento;
+      `mvn -B test -Dtest=CreditApplicationTest` → 54/54 verde, sin relación con este cambio. Este
+      diagnóstico **debe seguir fallando en CI** con las mismas 2 fallas — un verde invalidaría la
+      medición; no se tocó ninguna aserción, id ni severidad. Verificable: local. CI (round 2):
+      **pendiente, CI-only, acción del orquestador.**
+- [ ] 4.3 Fila aplicable: no aplica. La sección `AGGREGATE` del run PR1 (`REVERTED` con `reservationId`/`disbursementId` nulos, producido solo por `releaseFunds()` tras `FundsReleaseWorker`) prueba que la compensación ejecutó de punta a punta; un incidente técnico en `disburse-loan` habría impedido esa compensación. **Diferido a un cambio de seguimiento propio**, no se ejecuta en este cambio; `DisbursementWorker` no se toca. (Spec: Prohibiciones / defecto diferido). Verificable: local + CI. **No aplicó** por la razón anterior.
+- [x] 4.4 Ejecutar la compuerta de 2.1 antes de cualquier push del fix. Verificable: 100% local. Ejecutado tras los cambios de Fase B: `BUILD SUCCESS` (ver Work Unit Evidence).
+- [ ] 4.5 Abrir PR2 (base: main tras merge de PR1) y disparar el run de CI. (Spec: Cierre de Fase B con evidencia real de CI). Verificable: CI-only. **Pendiente — acción del orquestador, no de este batch de apply.**
+- [ ] 4.6 Confirmar cierre válido: 58/58, `conclusion=success`, registrar URL; una inferencia local no se acepta como evidencia. (Spec: Cierre de Fase B con evidencia real de CI). Verificable: CI-only. **Pendiente — depende de 4.5.**
+- [x] 4.7 Confirmar que ningún commit de A o B introdujo `continue-on-error`, `-Dtest=`, `@Disabled` ni aserciones debilitadas. (Spec: Prohibiciones sobre cómo se alcanza el verde). Verificable: local por inspección del diff. Confirmado por inspección de `git diff`: sin `continue-on-error`, sin `-Dtest=`, sin `@Disabled`, sin `assumeTrue`, ningún id ni aserción de elemento removida o debilitada — el único cambio de comportamiento de aserción es ampliar el timeout global de `CamundaAssert`.
+
+### Diagnóstico ronda 3 (causa raíz probada a nivel bytecode — corrección aditiva por búsqueda REST acotada)
+
+Causa raíz confirmada con `javap` contra `camunda-process-test-java-8.7.6.jar` (ya no es hipótesis):
+`CamundaDataSource.getFlowNodeInstancesByProcessInstanceKey(long)` delega en
+`CamundaApiClient.findFlowNodeInstancesByProcessInstanceKey(long)`, que arma el cuerpo del POST a
+`/v1/flownode-instances/search` desde una constante de compilación sin `size` ni `page` — el broker
+responde con su página por defecto de 10 filas. `FlowNodeInstancesResponseDto.total` existe pero
+`CamundaDataSource` lo descarta y devuelve solo `.getItems()`. Correlación confirmada en el dump de
+CI (run 30470024764): Zona gris 8 elementos (pasa), Mora vigente 6 (pasa), Compensación 10
+(falla, elementos 11/12/13 ausentes), Score alto 10 (falla, elemento 11 ausente). El proceso es
+correcto: `Activity_DisburseLoan` queda `TERMINATED` y `Boundary_DisbursementFailed` `COMPLETED` en
+el dump de compensación — la firma de un error BPMN atrapado por su boundary. Ids no observables:
+`EndEvent_Disbursed` (camino feliz) y `Event_CompensateOrigination`, `Activity_ReleaseFunds`,
+`EndEvent_DisbursementFailed` (compensación).
+
+- [x] 6.1 Crear `FlowNodeElementProbe.java` (test scope, `support`): helper de solo lectura que hace
+      login propio (`POST {restAddress}/api/login?username=demo&password=demo`) con Apache
+      HttpClient 5 (`CloseableHttpClient` + `HttpClientContext`/`BasicCookieStore` explícitos para
+      sostener la sesión) y consulta `POST {restAddress}/v1/flownode-instances/search` con filtro
+      `{"filter":{"processInstanceKey":...,"flowNodeId":"..."}}` — acotado a un id de elemento a la
+      vez, a lo sumo 1 fila, muy por debajo de cualquier tamaño de página. Parseo con Jackson
+      (`ObjectMapper.readTree`). Nunca lanza: cualquier fallo (login, red, parseo) se devuelve como
+      `Result` con `failureDetail` no nulo, incluyendo HTTP status, `total`, cantidad de items y el
+      cuerpo crudo (truncado a 500 caracteres). Todos los tipos de HttpClient5/Jackson verificados
+      con `javap` contra los jars reales antes de escribir código (`httpclient5-5.4.4.jar`,
+      `httpcore5-5.3.4.jar`, `jackson-databind-2.18.4.jar`). Javadoc de la clase documenta la causa
+      raíz completa con sus números. (Alcance: item 1 y 5 del prompt de apply). Verificable: local
+      por compilación.
+- [x] 6.2 Usar `FlowNodeElementProbe` en `CreditOriginationProcessTest`: nuevo helper privado
+      `assertTailElementCompleted(long, String)` que construye la sonda con
+      `processTestContext.getCamundaRestAddress()` (protegido con try/catch, nunca propaga NPE),
+      imprime una línea `DIAG | TAIL_ELEMENT | ...` con el detalle observado (para que el log de CI
+      muestre HTTP status/total/items/cuerpo incluso si la aserción falla) y luego afirma
+      `result.state()` == `"COMPLETED"` vía AssertJ con `.as(...)` describiendo el detalle
+      diagnóstico completo. Invocado para los 4 ids no observables: `EndEvent_Disbursed` (test "Score
+      alto") y `Event_CompensateOrigination`, `Activity_ReleaseFunds`, `EndEvent_DisbursementFailed`
+      (test "Desembolso rechazado"). (Alcance: item 2 del prompt de apply). Verificable: local por
+      compilación.
+- [x] 6.3 Interpretación deliberada de "aditivo" (documentada, no silenciosa): se retiraron
+      exclusivamente esos 4 ids de sus respectivas llamadas `hasCompletedElements(...)` (el resto de
+      ids, orden y severidad de esas llamadas queda intacto) porque, dada la causa raíz de 6.1/ronda
+      3, es matemáticamente imposible que `hasCompletedElements` los vea alguna vez — mantenerlos ahí
+      garantizaría que el test siga fallando en esa línea sin importar qué se agregue después. Los 4
+      ids se re-verifican de inmediato con `assertTailElementCompleted`, misma severidad (aserción
+      dura), mecanismo distinto. No se relajó ninguna cobertura: se reubicó. `hasTerminatedElements`
+      y el resto de `hasCompletedElements` (Zona gris, Mora vigente, y los ids de Score
+      alto/Compensación que sí caen en las primeras 10 filas) quedan sin tocar. Verificable: local
+      por inspección de `git diff`.
+- [x] 6.4 Compuerta local: `mvn -B test-compile` → `BUILD SUCCESS`; `mvn -B test
+      -Dtest=CreditApplicationTest` → 54/54 verde, sin relación con este cambio. `git diff --stat`
+      confirma que solo se tocó `CreditOriginationProcessTest.java` (modificado) y
+      `FlowNodeElementProbe.java` (nuevo) dentro de `src/test/**`; sin `continue-on-error`,
+      `-Dtest=`, `@Disabled` ni `assumeTrue` en el diff. Verificable: 100% local.
+- [ ] 6.5 CI-only, acción del orquestador: disparar el run y leer si `flowNodeId` es un filtro
+      aceptado por el broker y si el login se comporta como está documentado. Si las 2 fallas
+      desaparecen y el resto del suite sigue en 58/58 → corrección confirmada. Si la sonda misma
+      falla (login, filtro rechazado, parseo), la línea `DIAG | TAIL_ELEMENT` y el mensaje de
+      `.as(...)` de AssertJ deben traer HTTP status + `total` + cuerpo crudo suficientes para decidir
+      sin otra corrida si hay que caer al fallback de simplemente quitar esos ids sin reemplazo.
+      Pendiente — depende de CI real.
+
+## Phase 5: Cierre (bloqueado hasta el run verde real)
+
+- [ ] 5.1 No tocar la fila «Tests de proceso ejecutados» del README hasta 4.6 cerrado en verde; queda fuera de alcance de este checklist y de `ci-and-domain-tests` fase 5. (Spec: Prohibiciones). Verificable: local por inspección.

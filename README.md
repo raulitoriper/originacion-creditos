@@ -1,5 +1,7 @@
 # Originación de Créditos — Spring Boot 3 + Camunda 8
 
+[![CI](https://github.com/raulitoriper/originacion-creditos/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/raulitoriper/originacion-creditos/actions/workflows/ci.yml)
+
 Proceso de originación de créditos orquestado con **Camunda 8.7 (Zeebe)** y **Spring Boot 3.4**:
 scoring por DMN, revisión humana con SLA, firma digital asincrónica y **compensación de saga** cuando
 el desembolso falla. Arquitectura hexagonal, con tests que asiertan sobre el proceso y no sobre
@@ -135,13 +137,13 @@ src/main/java/com/rriveros/origination/
 
 | Comprobación | Estado |
 |---|---|
-| Compila con Java 21 | ✅ 38 fuentes, `release 21` |
+| Compila con Java 21 | ✅ 37 fuentes de producción + 4 de test, `release 21` |
 | BPMN estructuralmente válido | ✅ 25 nodos, 23 flujos, DI completo, referencias resueltas, `incoming`/`outgoing` coherentes |
 | Los 6 `job type` del modelo tienen worker 1:1 | ✅ exacto, sin huérfanos de ningún lado |
 | `decisionId` del DMN ↔ `calledDecision` del BPMN | ✅ `credit_scoring` |
 | `errorCode` del BPMN ↔ constante del worker | ✅ `DISBURSEMENT_FAILED` |
 | `domain/model` y `domain/port` sin frameworks | ✅ cero imports |
-| **Tests de proceso ejecutados** | ❌ **no** — ver [Docker 29](#incompatibilidad-con-docker-29) |
+| **Tests de proceso ejecutados** | ✅ **58/58 en CI** — [run](https://github.com/raulitoriper/originacion-creditos/actions/runs/30472808007) · localmente sigue bloqueado, ver [Docker 29](#incompatibilidad-con-docker-29) |
 
 Los cinco checks estáticos son copy-paste. Ninguno debe imprimir un error:
 
@@ -209,8 +211,11 @@ curl -X POST localhost:8080/api/credit-applications/<id>/signature
 ### Tests
 
 ```bash
-mvn test    # requiere Docker ≤ 28.x
+mvn test    # 58/58 en CI. Localmente requiere Docker ≤ 28.x
 ```
+
+`CreditApplicationTest` cubre las invariantes del agregado con **54 tests unitarios sin Docker** —
+`domain/model` sin un solo import de framework, así que corren en cualquier máquina.
 
 `CreditOriginationProcessTest` levanta **un Zeebe real en Testcontainers** con
 `camunda-process-test-spring`:
@@ -282,11 +287,20 @@ las costuras.
 | Integraciones | Bureau y ledger simulados (`SimulatedCreditBureauAdapter`, `InMemoryLedgerAdapter`). | Adaptadores HTTP reales — no toca una línea de dominio: para eso están los puertos. |
 | Seguridad | Sin autenticación. Camunda corre sin Identity/Keycloak y la API está abierta. | Es una demo local, no un despliegue. |
 | Infraestructura | `docker-compose.yml` no fue arrancado de punta a punta; sigue la configuración estándar de Camunda 8.7 Self-Managed. | Verificarlo en la máquina destino. |
-| Tests | No ejecutados por la incompatibilidad con Docker 29. | Ver [Qué está verificado y qué no](#qué-está-verificado-y-qué-no) para lo que sí está comprobado. |
+| Tests | Corren en CI (58/58), pero **no localmente**: Docker Engine 29.x rompe Testcontainers 1.20.6. | Pinnear `testcontainers-bom` en un `dependencyManagement` propio, o Docker ≤ 28.x. |
+| Aserciones de proceso | **`camunda-process-test-java` 8.7.6 tiene un bug de paginación**: `CamundaApiClient` consulta `/v1/flownode-instances/search` con un cuerpo constante, sin `size` ni `page`, así que recibe el default del servidor de **10 elementos** — y `CamundaDataSource` descarta el campo `total` que delataría el truncamiento. Cualquier proceso de más de 10 elementos recibe aserciones de elementos **falsamente negativas y silenciosas**. Probado con `javap` contra el jar. | Por eso existe [`FlowNodeElementProbe`](src/test/java/com/rriveros/origination/support/FlowNodeElementProbe.java): una búsqueda acotada por `flowNodeId` devuelve una sola fila y es inmune al límite. **No lo borres pensando que es sobreingeniería** — sin él, `EndEvent_Disbursed` y toda la cadena de compensación quedan sin asertar. Reportar el bug aguas arriba y quitar la sonda cuando CPT pagine bien. |
 
 ---
 
 ## Próximo paso
 
-`git init` y primer commit. Después, en orden de valor para la demo: el Camunda Form de la revisión
-manual, y el worker que reconcilia el estado en la rama de vencimiento de firma.
+En orden de valor:
+
+1. **Reportar aguas arriba el bug de paginación** de `camunda-process-test-java` 8.7.6 y quitar
+   `FlowNodeElementProbe` cuando esté arreglado.
+2. **Pinnear `testcontainers-bom`** en un `dependencyManagement` propio, para poder correr `mvn test`
+   completo sin depender de la versión de Docker de la máquina.
+3. El **Camunda Form** de la revisión manual (propuesta en `openspec/changes/manual-review-camunda-form/`).
+4. Ampliar el `catch` de `DisbursementWorker`: hoy solo atrapa `DisbursementRejectedException`, así que
+   cualquier otra excepción se escapa como fallo técnico en lugar de error de negocio.
+5. El worker que reconcilia el estado del agregado en la rama de vencimiento de firma.

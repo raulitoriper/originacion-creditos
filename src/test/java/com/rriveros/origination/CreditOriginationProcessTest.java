@@ -13,15 +13,23 @@ import com.rriveros.origination.domain.port.in.SignApplicationUseCase;
 import com.rriveros.origination.domain.port.in.SubmitCreditApplicationUseCase;
 import com.rriveros.origination.domain.port.in.SubmitCreditApplicationUseCase.SubmitCommand;
 import com.rriveros.origination.domain.port.out.CreditBureauGateway;
+import com.rriveros.origination.support.FlowNodeElementProbe;
+import com.rriveros.origination.support.ProcessDiagnostics;
 import io.camunda.process.test.api.CamundaAssert;
 import io.camunda.process.test.api.CamundaProcessTestContext;
 import io.camunda.process.test.api.CamundaSpringProcessTest;
 import io.camunda.zeebe.client.ZeebeClient;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -63,6 +71,36 @@ class CreditOriginationProcessTest {
     @MockitoBean
     private CreditBureauGateway bureau;
 
+    // Instancias observadas por processInstanceKeyOf() en el test en curso. Alimenta el volcado
+    // diagnostico de Fase A; no participa de ninguna asercion.
+    private final List<ObservedInstance> observedInstances = new ArrayList<>();
+
+    // Fase B (fix-process-test-failures), diagnostico ronda 2: este timeout de 20 s SE PROBO en CI
+    // (run 30466947115, commit 466c6d5) y NO cambio nada -- mismas 2 fallas, mismos elementos
+    // ausentes, 255 s de duracion total. Ademas se descarto por bytecode (javap contra los jars
+    // reales de camunda-process-test-java y camunda-process-test-spring) que
+    // CamundaProcessTestExecutionListener o CamundaAssert.reset() invoquen setAssertionTimeout o
+    // Awaitility en algun punto: reset() solo hace DATA_SOURCE.remove() sobre un ThreadLocal. El
+    // timeout de 20 s estuvo vigente durante todo ese run y los elementos igual no fueron
+    // observables: queda establecido que esto NO es un problema de tiempo/espera. Se conserva este
+    // @BeforeAll unicamente a la espera del arreglo real -- que el volcado de la ronda 2 via
+    // CamundaDataSource (ver ProcessDiagnostics) debe permitir identificar -- y se revierte con
+    // restoreAssertionTimeout() para no dejar mutado un default global de Awaitility entre clases
+    // de test (surefire usa reuseForks=true por defecto, sin override en pom.xml).
+    @BeforeAll
+    static void configureAssertionTimeout() {
+        CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20));
+    }
+
+    // Revierte el timeout global de Awaitility que configureAssertionTimeout() establecio arriba.
+    // CamundaProcessTestExecutionListener no lo resetea entre tests (verificado por javap), y sin
+    // fork por clase el valor mutado sobreviviria a esta clase y contaminaria la siguiente que
+    // corra en el mismo fork si no se restaura aca.
+    @AfterAll
+    static void restoreAssertionTimeout() {
+        CamundaAssert.setAssertionTimeout(CamundaAssert.DEFAULT_ASSERTION_TIMEOUT);
+    }
+
     @BeforeEach
     void deployModels() {
         zeebeClient.newDeployResourceCommand()
@@ -70,6 +108,37 @@ class CreditOriginationProcessTest {
                 .addResourceFromClasspath(DMN_RESOURCE)
                 .send()
                 .join();
+    }
+
+    // Fase A (fix-process-test-failures): volcado diagnostico de solo lectura, corre aun cuando
+    // el metodo de test ya lanzo una AssertionError. No cambia ni un id ni una asercion existente.
+    //
+    // Fase B: findApplication.findById() se protege con try/catch, mismo patron que
+    // ProcessDiagnostics.printError -- una falla aca no debe agregar una falla espuria dentro de
+    // @AfterEach ni desplazar la AssertionError real del metodo de test.
+    //
+    // Diagnostico ronda 2: se pasa la direccion REST del broker (processTestContext, ya autowired)
+    // para que ProcessDiagnostics pueda construir su propio CamundaDataSource de solo lectura.
+    @AfterEach
+    void dumpDiagnostics(TestInfo testInfo) {
+        // Tambien protegido: getCamundaRestAddress() puede fallar o devolver null, y una NPE aca
+        // escaparia del @AfterEach. Si no se resuelve, el volcado sigue con las secciones que no
+        // dependen del broker.
+        String camundaRestAddress = null;
+        try {
+            camundaRestAddress = processTestContext.getCamundaRestAddress().toString();
+        } catch (Exception e) {
+            ProcessDiagnostics.printError("DATASOURCE", e);
+        }
+        for (ObservedInstance observed : observedInstances) {
+            CreditApplication aggregate = null;
+            try {
+                aggregate = findApplication.findById(observed.applicationId()).orElse(null);
+            } catch (Exception e) {
+                ProcessDiagnostics.printError("AGGREGATE", e);
+            }
+            ProcessDiagnostics.dump(testInfo, observed.processInstanceKey(), aggregate, camundaRestAddress);
+        }
     }
 
     @Test
@@ -80,7 +149,15 @@ class CreditOriginationProcessTest {
         // cuota 30.000.000/24 = 1.250.000 sobre ingreso 12.000.000 -> ratio 0.1042
         // score 820 >= 750 y ratio <= 0.30 -> Rule_PrimeAutoApprove -> APPROVED
         String applicationId = submit("4501234", new BigDecimal("12000000"), new BigDecimal("30000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId,
+                "Activity_QueryBureau",
+                "Activity_ScoreApplicant",
+                "Event_SignatureReceived",
+                "Activity_ReserveFunds",
+                "Activity_DisburseLoan",
+                "Activity_NotifyApproval",
+                "EndEvent_Disbursed");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .hasCompletedElements("Activity_QueryBureau", "Activity_ScoreApplicant")
@@ -95,8 +172,16 @@ class CreditOriginationProcessTest {
                         "Event_SignatureReceived",
                         "Activity_ReserveFunds",
                         "Activity_DisburseLoan",
-                        "Activity_NotifyApproval",
-                        "EndEvent_Disbursed");
+                        "Activity_NotifyApproval");
+
+        // Fase B (fix-process-test-failures): EndEvent_Disbursed es el 11er flow node instance
+        // creado en esta corrida (10 lo preceden) y CamundaAssert.hasCompletedElements no puede
+        // verlo -- causa raiz probada a nivel bytecode, ver Javadoc de FlowNodeElementProbe (limite
+        // de pagina de 10 filas del broker, CamundaDataSource descarta el campo "total" y devuelve
+        // solo esas 10 filas). Se verifica aparte con una busqueda REST acotada por flowNodeId, que
+        // devuelve a lo sumo 1 fila y no sufre esa truncacion. Asercion aditiva: no reemplaza
+        // hasCompletedElements para los ids que si caen dentro de las primeras 10 filas.
+        assertTailElementCompleted(processInstanceKey, "EndEvent_Disbursed");
 
         CreditApplication application = reload(applicationId);
         assertThat(application.status()).isEqualTo(ApplicationStatus.DISBURSED);
@@ -109,7 +194,8 @@ class CreditOriginationProcessTest {
         givenBureauReport(700, true);
 
         String applicationId = submit("4507771", new BigDecimal("12000000"), new BigDecimal("20000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey =
+                processInstanceKeyOf(applicationId, "Activity_NotifyRejection", "EndEvent_Rejected");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .isCompleted()
@@ -128,19 +214,33 @@ class CreditOriginationProcessTest {
         // 160.000.000 supera el limite del ledger (150.000.000) -> DISBURSEMENT_FAILED
         // cuota 6.666.666,67 sobre ingreso 30.000.000 -> ratio 0.2222, entra por APPROVED
         String applicationId = submit("4509991", new BigDecimal("30000000"), new BigDecimal("160000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId,
+                "Activity_ScoreApplicant",
+                "Activity_ReserveFunds",
+                "Activity_DisburseLoan",
+                "Event_CompensateOrigination",
+                "Activity_ReleaseFunds",
+                "EndEvent_DisbursementFailed");
 
         CamundaAssert.assertThat(byKey(processInstanceKey)).hasCompletedElements("Activity_ScoreApplicant");
         signApplication.sign(applicationId);
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .isCompleted()
-                .hasCompletedElements(
-                        "Activity_ReserveFunds",
-                        "Event_CompensateOrigination",
-                        "Activity_ReleaseFunds",
-                        "EndEvent_DisbursementFailed")
+                .hasCompletedElements("Activity_ReserveFunds")
                 .hasTerminatedElements("Activity_DisburseLoan");
+
+        // Fase B (fix-process-test-failures): Event_CompensateOrigination, Activity_ReleaseFunds y
+        // EndEvent_DisbursementFailed son los flow node instances 11, 12 y 13 creados en esta
+        // corrida (la compensacion completa via boundary error), fuera de la pagina de 10 filas que
+        // CamundaDataSource devuelve sin paginar -- misma causa raiz que en el camino feliz, ver
+        // Javadoc de FlowNodeElementProbe. Se verifican aparte con la misma busqueda REST acotada
+        // por flowNodeId. Asercion aditiva: no reemplaza hasCompletedElements/hasTerminatedElements
+        // para los ids que si caen dentro de las primeras 10 filas.
+        assertTailElementCompleted(processInstanceKey, "Event_CompensateOrigination");
+        assertTailElementCompleted(processInstanceKey, "Activity_ReleaseFunds");
+        assertTailElementCompleted(processInstanceKey, "EndEvent_DisbursementFailed");
 
         CreditApplication application = reload(applicationId);
         assertThat(application.status()).isEqualTo(ApplicationStatus.REVERTED);
@@ -155,7 +255,8 @@ class CreditOriginationProcessTest {
 
         // score 600: no llega a ninguna regla de aprobacion automatica -> MANUAL_REVIEW
         String applicationId = submit("4503331", new BigDecimal("12000000"), new BigDecimal("20000000"), 36);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId, "Activity_ManualReview", "Activity_EscalateReview", "EndEvent_Escalated");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .hasVariable("riskDecision", "MANUAL_REVIEW")
@@ -184,11 +285,44 @@ class CreditOriginationProcessTest {
                 document, "Solicitante de prueba", monthlyIncome, requestedAmount, termMonths));
     }
 
-    private long processInstanceKeyOf(String applicationId) {
-        return reload(applicationId).processInstanceKey();
+    private long processInstanceKeyOf(String applicationId, String... expectedElementIds) {
+        long processInstanceKey = reload(applicationId).processInstanceKey();
+        observedInstances.add(
+                new ObservedInstance(processInstanceKey, applicationId, List.of(expectedElementIds)));
+        return processInstanceKey;
     }
 
     private CreditApplication reload(String applicationId) {
         return findApplication.findById(applicationId).orElseThrow();
     }
+
+    // Fase B (fix-process-test-failures): asercion aditiva para un flow node instance que
+    // CamundaAssert.hasCompletedElements no puede ver por el limite de pagina de 10 filas de
+    // CamundaDataSource (ver Javadoc de FlowNodeElementProbe para la causa raiz completa, probada a
+    // nivel bytecode). Imprime una linea DIAG con el resultado observado ANTES de la asercion, para
+    // que el log de CI muestre el detalle exacto (HTTP status, total, cantidad de items, cuerpo
+    // crudo) incluso si la asercion falla.
+    private void assertTailElementCompleted(long processInstanceKey, String flowNodeId) {
+        String camundaRestAddress;
+        try {
+            camundaRestAddress = processTestContext.getCamundaRestAddress().toString();
+        } catch (Exception e) {
+            camundaRestAddress = null;
+        }
+        FlowNodeElementProbe probe = new FlowNodeElementProbe(camundaRestAddress);
+        FlowNodeElementProbe.Result result = probe.findElementState(processInstanceKey, flowNodeId);
+        System.out.println(
+                "DIAG | TAIL_ELEMENT | flowNodeId=" + flowNodeId + " pik=" + processInstanceKey + " | "
+                        + result.diagnosticDetail());
+        assertThat(result.state())
+                .as(
+                        "estado de %s (pik=%d) via busqueda REST acotada por flowNodeId -- %s",
+                        flowNodeId, processInstanceKey, result.diagnosticDetail())
+                .isEqualTo("COMPLETED");
+    }
+
+    // Registro minimo para el volcado diagnostico de Fase A: la key ya se resuelve en
+    // processInstanceKeyOf(), y el agregado se recarga por applicationId dentro de @AfterEach.
+    private record ObservedInstance(
+            long processInstanceKey, String applicationId, List<String> expectedElementIds) {}
 }

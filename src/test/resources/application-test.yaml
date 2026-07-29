@@ -19,6 +19,8 @@ origination:
 
 logging:
   level:
-    io.camunda: WARN
+    io.camunda: WARN                                    # se conserva: evita el ruido del JobPoller
+    io.camunda.process.test: DEBUG                      # habilita el impresor de resultados de CPT
+    io.camunda.zeebe.spring.client.jobhandling: DEBUG   # invocacion y falla de jobs de la app
     org.testcontainers: WARN
     com.rriveros.origination: INFO
