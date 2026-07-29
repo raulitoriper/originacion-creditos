@@ -143,6 +143,9 @@ public class CreditApplication {
     }
 
     public void reject(String reason) {
+        if (reason == null || reason.trim().isEmpty()) {
+            throw new IllegalArgumentException("El motivo de rechazo es obligatorio");
+        }
         if (status == ApplicationStatus.REJECTED) {
             return;
         }

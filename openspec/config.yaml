@@ -1,0 +1,97 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Stack: Java 21, Maven 3.6.3, Spring Boot 3.4.6, Camunda 8.7.6
+  (spring-boot-starter-camunda-sdk), Postgres 16 + Flyway, H2 en tests.
+  Arquitectura: hexagonal (domain/port, domain/service, adapter/in, adapter/out).
+  Proceso: BPMN (credit-origination.bpmn) + DMN (credit-scoring.dmn).
+  Testing: camunda-process-test-spring 8.7.6 (Testcontainers) para el proceso
+  end-to-end; sin tests unitarios de dominio todavía.
+  Idioma de artefactos: español, registro neutro/profesional.
+
+strict_tdd: true # Ver testing.strict_tdd_note: bloqueado por Docker 29 en esta máquina
+
+rules:
+  proposal:
+    - Incluir plan de rollback para cambios riesgosos
+    - Redactar en español, registro neutro/profesional
+  specs:
+    - Usar Given/When/Then para escenarios
+    - Usar palabras clave RFC 2119 (MUST, SHALL, SHOULD, MAY)
+    - Redactar en español; identificadores y job types en inglés
+  design:
+    - Documentar decisiones de arquitectura con justificación
+    - Preservar los límites hexagonales (domain/port vs adapter)
+    - Redactar en español
+  tasks:
+    - Agrupar por fase, numeración jerárquica
+    - Tareas completables en una sesión
+    - Redactar en español
+  apply:
+    guidelines:
+      - Seguir los patrones existentes de arquitectura hexagonal
+      - No introducir dependencias de infraestructura en domain/*
+    tdd: true
+    test_command: "mvn test-compile" # ver testing.blocked_command más abajo
+  verify:
+    test_command: "mvn test-compile"
+    build_command: "mvn -q -DskipTests package"
+    coverage_threshold: 0
+  archive:
+    - Advertir antes de fusionar deltas destructivos
+
+testing:
+  strict_tdd_declared: true # heredado de CLAUDE.md global del usuario
+  strict_tdd_verifiable: partial # dominio SÍ (no necesita Docker); proceso NO (Docker 29)
+  strict_tdd_note: >
+    ACTUALIZADO 2026-07-29. La asimetría es lo que importa: los tests unitarios de
+    dominio NO necesitan Docker, así que con Maven instalado son ejecutables
+    localmente y TDD estricto es verificable de verdad para la capa de dominio.
+    Lo que sigue bloqueado es únicamente CreditOriginationProcessTest, por el gap
+    entre Docker Engine 29.3.1 (MinAPIVersion 1.40) y Testcontainers 1.20.6,
+    fijado transitivamente por camunda-process-test-spring:8.7.6. Es decir:
+    "mvn test" completo falla acá, pero "mvn test -Dtest=CreditApplicationTest"
+    corre. La verificación del test de proceso ocurre solo en CI.
+  working_command: "mvn test-compile" # EJECUTABLE Y VERIFICADO 2026-07-29
+  working_command_status: >
+    RESUELTO 2026-07-29. Historia: el BUILD SUCCESS original era real pero
+    irreproducible, hecho con un JDK y un Maven portables temporales de una sesión
+    anterior en un directorio temp ya limpiado; durante un rato el comando falló con
+    "command not found". Se instaló Maven 3.9.16 con "scoop install maven" y se
+    reejecutó desde cero: BUILD SUCCESS en 30 s, 37 fuentes principales + 1 de test,
+    release 21, con ~/.m2 recreado (120 MB). Ahora es reproducible.
+  invocation_note: >
+    scoop agregó ~\scoop\apps\maven\current\bin al PATH, así que en una terminal
+    NUEVA "mvn" funciona directo. En shells ya abiertas antes de la instalación hay
+    que usar la ruta completa:
+      export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"
+      "C:/Users/rriveros/scoop/apps/maven/current/bin/mvn.cmd" -B <goals>
+  domain_test_command: "mvn -B test -Dtest=CreditApplicationTest" # sin Docker, ejecutable localmente
+  blocked_command: "mvn test" # bloqueado, no inexistente
+  blocked_reason: >
+    Docker Engine 29.3.1 exige MinAPIVersion 1.40; Testcontainers 1.20.6
+    negocia por debajo de ese mínimo y recibe HTTP 400. Probado sin éxito:
+    DOCKER_HOST en los tres named pipes, DOCKER_API_VERSION=1.44,
+    -Dtestcontainers.version=1.21.3. Workaround: Docker Engine <= 28.x o
+    daemon remoto.
+  java_home_note: >
+    CORREGIDO 2026-07-29 por verificación directa. La afirmación anterior —«el
+    JAVA_HOME apunta a JDK 8»— es FALSA. JAVA_HOME apunta a
+    "C:\Program Files\Android\Android Studio\jbr", que es JDK 21.0.10 con javac
+    21.0.10. Ese JBR alcanza para compilar el proyecto (release 21).
+    Lo que SÍ falta: mvn no está instalado ni en PATH, java tampoco está en PATH
+    (solo accesible por ruta completa al JBR), y no existe ~/.m2, así que la
+    primera build tiene que descargar el árbol de dependencias completo.
+    Maven se instala con "scoop install maven" (3.9.16 en el bucket main).
+  test_layers:
+    unit: false # no hay tests unitarios de dominio todavía
+    integration: true # CreditOriginationProcessTest, 4 escenarios end-to-end
+    e2e: false
+  coverage:
+    available: false
+    command: ""
+  quality_tools:
+    linter: "—"
+    type_checker: "—" # Java: compilación mvn test-compile actúa como chequeo de tipos
+    formatter: "—"

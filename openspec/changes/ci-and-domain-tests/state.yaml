@@ -1,0 +1,157 @@
+change_name: ci-and-domain-tests
+created: 2026-07-29
+
+session:
+  execution_mode: interactive
+  artifact_store: hybrid
+  delivery_strategy: ask-always
+  review_budget_lines: 400
+
+phases:
+  explore: done
+  proposal: done
+  specs: done
+  design: done
+  tasks: done
+  apply: pending
+  verify: pending
+  archive: pending
+
+next_recommended: sdd-apply
+
+review_workload_guard:
+  estimated_changed_lines: 243-315
+  budget_risk: low # presupuesto 400
+  chained_prs_recommended: false
+  decision_needed_before_apply: false
+  verdict: passed # en la fase tasks, con el forecast de 243-315
+  internal_review_units: 3 # dominio+guarda, CI, README
+
+size_exception:
+  recorded: 2026-07-29
+  measured_lines: 411 # CreditApplicationTest.java 377 + ci.yml 31 + guarda en reject() 3
+  budget: 400
+  overrun: 11 # 2,75 %
+  decided_by: usuario # delivery_strategy ask-always, se preguntó y se aprobó excepción
+  justification: >
+    El sobrante viene entero del @ParameterizedTest de 34 casos de transiciones ilegales que el
+    requisito 2.3 del spec exige para que agregar un estado nuevo no pueda saltear cobertura en
+    silencio. El presupuesto de 400 aproxima carga de revisión, y una tabla paramétrica repetitiva no
+    cuesta 34 unidades de atención. Partirlo habría separado los tests del código que cubren.
+  rejected_alternatives:
+    - PRs encadenados: dos ciclos de revisión y CI inexistente hasta el segundo PR.
+    - Recortar cobertura: violaba el requisito 2.3 en lugar de honrarlo.
+
+apply_batch_1:
+  scope: fases 2, 3 y 4.1-4.2
+  tasks_done: 10/16
+  tdd_evidence:
+    red: "Tests run: 54, Failures: 4 — «Expecting code to raise a throwable», causa correcta"
+    green: "Tests run: 54, Failures: 0, BUILD SUCCESS"
+    verificado_por_orquestador: >
+      Reejecutado de forma independiente: 54 tests en 10 clases @Nested, 0 fallas, 0 errores.
+      34 de IllegalTransitions, 6 de Reject, resto por operación.
+  hexagonal_boundary_verificada: >
+    CreditApplicationTest importa solo AssertJ, JUnit Jupiter y java.*. Cero imports de Spring, JPA o
+    Camunda.
+  guarda_posicion_verificada: primera sentencia de reject(), antes del corto de idempotencia
+
+task_phases:
+  1: prerrequisito externo — el usuario autentica GitHub y habilita push (1 tarea)
+  2: tests de dominio sobre comportamiento existente, verificable localmente (4 tareas)
+  3: TDD RED→GREEN de la guarda de motivo en reject(), único cambio productivo (4 tareas)
+  4: workflow de CI, verificable solo en CI (4 tareas)
+  5: README, bloqueado hasta evidencia de un run verde real (2 tareas)
+
+scope:
+  domain_unit_tests: true
+  github_actions_ci: true
+  ci_runs_process_tests: true # runner trae Docker 28.0.4, sí puede
+  testcontainers_bom_pin: false # decidido: fuera de alcance, cambio de seguimiento
+  reject_reason_guard: true # decidido: lo posee este cambio, no manual-review-camunda-form
+  attach_process_instance_guard: false # cambio de seguimiento; ninguna regla de negocio lo exige hoy
+  record_screening_null_check: false # cambio de seguimiento; ningún llamador del proceso pasa null
+  readme_verification_row_and_badge: true
+
+capabilities:
+  new:
+    - credit-application-invariants
+    - build-verification-pipeline
+  modified: [] # openspec/specs/ está vacío
+
+line_forecast:
+  domain_unit_tests: 200-250
+  reject_guard: 5-8
+  ci_workflow: 30-45
+  readme: 8-12
+  total: 243-315
+  fits_single_pr: true # presupuesto 400
+
+prerequisites:
+  - Remoto GitHub bajo la cuenta personal del autor. Sin repositorio publicado no hay Actions.
+
+open_decisions: [] # ambas resueltas en la propuesta; ver resolved_decisions
+
+resolved_decisions:
+  - Pin de org.testcontainers:testcontainers-bom: FUERA de alcance. Pasa a cambio de seguimiento
+    dedicado. Compatibilidad con camunda-process-test-java 8.7.6 sin verificar; no puede estar en el
+    camino crítico de este entregable. Sigue siendo la cobertura durable contra el rollout de Docker 29.
+  - Colisión con manual-review-camunda-form: la guarda de motivo en reject() la posee ESTE cambio.
+    Acción pendiente del orquestador: dar de baja esa línea del alcance y del criterio de éxito de
+    manual-review-camunda-form (y de su capacidad review-decision-audit) antes de escribir su spec.
+    Esta propuesta no editó sus archivos.
+
+coordination:
+  manual-review-camunda-form:
+    action: remover del alcance «Guarda de dominio: reject() exige motivo con contenido»
+    owner_now: ci-and-domain-tests
+    status: flagged_not_applied
+
+critical_risks:
+  - Rollout de Docker 29.1.x en runners de GitHub (anunciado 30-ene-2026, no presente en la imagen
+    del 20-jul-2026) rompería CI con el mismo HTTP 400 que la máquina local.
+
+verified_facts:
+  - ubuntu-24.04 imagen 20260720.247.2 declara Docker Server 28.0.4, no 29.x.
+  - JDK por defecto de ubuntu-latest es 17; CI debe fijar 21 explícitamente.
+  - reject() no valida hoy el contenido del motivo (CreditApplication.java:145-154).
+  - pom.xml sin dependencyManagement ni propiedad testcontainers.version; el intento
+    -Dtestcontainers.version=1.21.3 fue un no-op, no evidencia de incompatibilidad.
+  - El único llamador productivo de reject() es NotificationWorker.reasonFor(), que siempre devuelve
+    un literal no vacío. La guarda de motivo no puede romper los 4 tests de proceso existentes.
+  - README.md:144 contiene la fila «**Tests de proceso ejecutados** | ❌ **no**» que este cambio cierra.
+
+design_decisions:
+  reject_guard_exception: IllegalArgumentException # coherente con submit(); un motivo vacío no tiene
+    # estado que culpar, y InvalidApplicationStateException estructura su mensaje sobre el estado
+  reject_guard_position: antes del corto de idempotencia # hace la guarda total; reject("") sobre una
+    # solicitud ya REJECTED lanza en lugar de retornar. Seguro: los retries de Zeebe reenvían el mismo
+    # literal no vacío
+  reason_storage: tal como se recibe # la guarda valida, no normaliza con trim lo que se persiste
+  test_class: CreditApplicationTest con @Nested por operación
+  test_naming: sufijo Test # válido bajo los includes por defecto de Surefire y bajo los de Spring Boot
+  new_dependencies: none # spring-boot-starter-test ya aporta JUnit Jupiter, AssertJ y junit-jupiter-params
+  ci_jobs: single job build
+  maven_wrapper: false # cambio de seguimiento
+  ci_triggers: push a main + pull_request a main, con concurrency cancel-in-progress
+
+environment_verified_2026_07_29:
+  java_home: C:\Program Files\Android\Android Studio\jbr — JDK 21.0.10, javac 21.0.10
+  java_home_previous_claim: INCORRECTO en openspec/config.yaml, que decía JDK 8
+  mvn_on_path: false # mvn no está instalado
+  java_on_path: false # solo accesible por ruta completa al JBR
+  local_maven_repo: ausente # no existe ~/.m2, la primera build debe descargar todo el árbol
+  maven_available_via: scoop install maven # 3.9.16 en el bucket main
+  resolved: >
+    RESUELTO el mismo día. Maven 3.9.16 instalado con «scoop install maven» y verificado:
+    mvn -B test-compile desde cero dio BUILD SUCCESS en 30 s, 37 fuentes principales + 1 de test,
+    release 21, con ~/.m2 recreado (120 MB). El comando es reproducible.
+  consequence_historica: >
+    El working_command «mvn test-compile» declarado en openspec/config.yaml estuvo NO ejecutable:
+    el BUILD SUCCESS registrado se produjo con un JDK y un Maven portables temporales de una sesión
+    anterior, en un directorio temp ya limpiado. Lección: registrar el comando no alcanza, hay que
+    registrar de qué depende.
+  opportunity: >
+    Con Maven instalado, los tests unitarios de dominio SÍ son ejecutables localmente: no necesitan
+    Docker. El bloqueo de Docker 29 solo afecta a CreditOriginationProcessTest. TDD estricto pasa a ser
+    verificable de verdad para la capa de dominio, que es justo la que este cambio agrega.

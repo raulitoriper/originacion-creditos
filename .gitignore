@@ -12,3 +12,5 @@ target/
 
 *.log
 .DS_Store
+# Local AI runtime state
+.atl/

@@ -1,0 +1,43 @@
+change_name: manual-review-camunda-form
+created: 2026-07-28
+
+session:
+  execution_mode: interactive
+  artifact_store: openspec
+  delivery_strategy: auto-chain
+  review_budget_lines: 400
+
+phases:
+  explore: done
+  proposal: done
+  specs: pending
+  design: pending
+  tasks: pending
+  apply: pending
+  verify: pending
+  archive: pending
+
+next_recommended: sdd-spec  # sdd-design puede correr en paralelo
+
+scope:
+  analyst_can: approve_or_reject_only
+  comment_required: on_rejection_only
+  form_data: existing_process_variables_only
+  audit_reviewer: true
+  reject_reason_guard: false # la posee ci-and-domain-tests; este cambio la consume
+
+coordination:
+  ci-and-domain-tests:
+    owns: guarda de motivo con contenido en CreditApplication.reject()
+    rule: no vacío tras trim
+    action_applied: 2026-07-29 — dada de baja del alcance, capacidad review-decision-audit,
+      áreas afectadas, riesgos, criterios de éxito y dependencias de esta propuesta
+    note: el spec de este cambio NO debe volver a especificar esa guarda
+
+open_decisions:
+  - Ubicación del adaptador de lectura de assignee: extender ZeebeOriginationProcessAdapter
+    (contradice su Javadoc de solo escritura) o crear un adaptador hermano de solo lectura.
+
+critical_risks:
+  - form-js conditional.hide saltando validate.required no verificado en vivo; requiere smoke test.
+  - Lag de indexación asíncrona en newUserTaskQuery(); mitigación es no filtrar por state.
