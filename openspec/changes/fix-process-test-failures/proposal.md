@@ -35,8 +35,12 @@ disponible.
    para las 4 instancias: cada element instance con estado y timestamp, incidentes con mensaje y
    `errorType`, estado de la instancia y end event por el que salió, `processDefinitionVersion`,
    variables relevantes, y estado del agregado (`status`, `reservationId`, `disbursementId`).
-2. **Fase A — logs del motor.** Subir `io.camunda` de `WARN` a `DEBUG` en el perfil de test para que
-   activaciones de job, reintentos e incidentes queden en el log del run.
+2. **Fase A — logs del motor.** Conservar `io.camunda: WARN` (evita el ruido del `JobPoller`, que
+   loguea a DEBUG en cada poll de cada uno de los 7 workers) y agregar dos overrides acotados —
+   `io.camunda.process.test: DEBUG` e `io.camunda.zeebe.spring.client.jobhandling: DEBUG`— para que
+   el impresor de resultados de CPT y la invocacion/falla de jobs de la app queden en el log del
+   run. Un `io.camunda: DEBUG` global fue descartado en design.md (Decision 5) por sepultar el
+   volcado.
 3. **Fase B — corrección, contingente.** Área definida por la tabla de decisión de abajo.
 
 ### Excluido
@@ -100,7 +104,7 @@ propuesta.
 | Riesgo | Probabilidad | Mitigación |
 |---|---|---|
 | El volcado no captura el dato decisivo y se gasta un run sin cerrar el diagnóstico | Media | Volcar estado completo de elementos, incidentes, variables, versión de definición y agregado, no solo lo sospechado |
-| `io.camunda: DEBUG` infla el log y dificulta encontrar el volcado | Media | Delimitar el volcado con marcadores buscables por test |
+| Subir el nivel de log infla el log y dificulta encontrar el volcado | Media | `io.camunda` se conserva en `WARN`; solo se destapan dos overrides acotados (`io.camunda.process.test`, `io.camunda.zeebe.spring.client.jobhandling`), y el volcado se delimita con marcadores buscables por test |
 | La instrumentación enmascara la falla y CI pasa a verde sin arreglo | Baja | Criterio de éxito explícito: la Fase A debe seguir en BUILD FAILURE con las mismas 2 fallas |
 | La Fase B necesita más de un run | Media | La tabla de decisión se resuelve con el volcado; si queda ambigua, se amplía la instrumentación antes de intentar un fix |
 

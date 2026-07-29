@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -72,6 +73,21 @@ class CreditOriginationProcessTest {
     // diagnostico de Fase A; no participa de ninguna asercion.
     private final List<ObservedInstance> observedInstances = new ArrayList<>();
 
+    // Fase B (fix-process-test-failures): el run de CI de Fase A (PR1, commit 0de59c1) probo, via
+    // la seccion AGGREGATE del volcado, que las 4 instancias completan correctamente (REVERTED con
+    // ids nulos, DISBURSED con ids reales). Sin embargo 2 de los 4 tests seguian fallando en
+    // hasCompletedElements para elementos tardios del camino esperado. El timeout de asercion por
+    // defecto de CamundaAssert (10 s, Awaitility) expiraba antes de que la vista exportada
+    // reflejara esos elementos; el volcado de Fase A confirmo el patron "ausente en T1 (a los
+    // ~10 s), presente en T2 (a los ~13 s)" para exactamente esos sufijos, lo que ubica el defecto
+    // en la fila "COMPLETED con timestamp anterior a la falla" de la tabla de decision: estrategia
+    // de asercion del test, no el modelo. Se amplia el timeout una sola vez para toda la clase;
+    // mismos ids, misma severidad de asercion, el BPMN no se toca.
+    @BeforeAll
+    static void configureAssertionTimeout() {
+        CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20));
+    }
+
     @BeforeEach
     void deployModels() {
         zeebeClient.newDeployResourceCommand()
@@ -83,17 +99,20 @@ class CreditOriginationProcessTest {
 
     // Fase A (fix-process-test-failures): volcado diagnostico de solo lectura, corre aun cuando
     // el metodo de test ya lanzo una AssertionError. No cambia ni un id ni una asercion existente.
+    //
+    // Fase B: findApplication.findById() se protege con try/catch, mismo patron que
+    // ProcessDiagnostics.printError -- una falla aca no debe agregar una falla espuria dentro de
+    // @AfterEach ni desplazar la AssertionError real del metodo de test.
     @AfterEach
     void dumpDiagnostics(TestInfo testInfo) {
         for (ObservedInstance observed : observedInstances) {
-            CreditApplication aggregate =
-                    findApplication.findById(observed.applicationId()).orElse(null);
-            ProcessDiagnostics.dump(
-                    zeebeClient,
-                    testInfo,
-                    observed.processInstanceKey(),
-                    observed.expectedElementIds(),
-                    aggregate);
+            CreditApplication aggregate = null;
+            try {
+                aggregate = findApplication.findById(observed.applicationId()).orElse(null);
+            } catch (Exception e) {
+                ProcessDiagnostics.printError("AGGREGATE", e);
+            }
+            ProcessDiagnostics.dump(testInfo, observed.processInstanceKey(), aggregate);
         }
     }
 

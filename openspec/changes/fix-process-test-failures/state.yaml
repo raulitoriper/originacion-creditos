@@ -13,7 +13,53 @@ phases:
   specs: done
   design: done
   tasks: done
-  apply: fase_a_done # fase B contingente, no se puede escribir hasta leer el volcado
+  apply: fase_b_done # pendiente de evidencia real de CI
+
+resultado_fase_a:
+  run: https://github.com/raulitoriper/originacion-creditos/actions/runs/30464756832
+  pr: https://github.com/raulitoriper/originacion-creditos/pull/1
+  commit: 0de59c1
+  criterio_invertido: SE CUMPLIO # conclusion=failure, 58 tests, 2 fallas, mismos elementos que 75e3776
+  evidencia_valida: true
+  hallazgo_decisivo: >
+    La seccion AGGREGATE del volcado probo que el proceso es CORRECTO en los 4 escenarios.
+    Compensacion (falla): status=REVERTED, reservationId=null, disbursementId=null. Score alto
+    (falla): status=DISBURSED, reservationId=RES-2F544133, disbursementId=DIS-89CB7187.
+    REVERTED con ambos ids nulos lo produce unicamente releaseFunds(), invocado por
+    FundsReleaseWorker, el worker atado a Activity_ReleaseFunds. Ese elemento SE EJECUTO, luego
+    Event_CompensateOrigination se disparo, luego el BPMN error se lanzo y el boundary lo atrapo.
+    La compensacion de saga funciona de punta a punta.
+  veredicto: >
+    Fila 5 de la tabla de decision. CamundaAssert.hasCompletedElements reporta como not activated
+    elementos que demostrablemente corrieron. El defecto esta en la observacion, no en el modelo.
+  hallazgo_secundario: >
+    Las tres consultas del volcado basadas en el cliente dieron HTTP 401 Unauthorized. En 8.7 la API
+    de busqueda la sirve la capa REST, que exige autenticacion, y el cliente de CPT no lleva esas
+    credenciales. Las lineas DIAG | EXPECTED | MISSING son artefacto del 401, no evidencia.
+  disbursement_worker_descartado: >
+    Un incidente tecnico en disburse-loan habria impedido la compensacion y el agregado no seria
+    REVERTED. La condicion para traer ese defecto a la fase B no se cumplio. Sigue diferido.
+
+fase_b:
+  causa_raiz_verificada_con_javap: >
+    CamundaAssert.setAssertionTimeout(Duration) es metodo publico estatico real en
+    camunda-process-test-java-8.7.6.jar y delega en Awaitility.setDefaultTimeout.
+    DEFAULT_ASSERTION_TIMEOUT son 10 segundos. CamundaProcessTestExecutionListener no resetea el
+    default entre tests, asi que un solo @BeforeAll alcanza para toda la clase.
+  arreglo: CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20)) en @BeforeAll
+  aserciones_intactas: true # verificado por el orquestador, cero lineas de asercion modificadas
+  otros_cambios:
+    - try/catch en findApplication.findById dentro del @AfterEach, hallazgo de dos lentes
+    - ProcessDiagnostics reducido a la seccion AGGREGATE; se quitaron las cuatro que daban 401
+    - proposal.md reconciliado, ya no afirma io.camunda DEBUG global
+  gates_locales: mvn -B test-compile BUILD SUCCESS; mvn -B test -Dtest=CreditApplicationTest 54/54
+  sin_verificar: >
+    Que 20 s alcance es CI-ONLY. No se puede saber localmente por el bloqueo de Docker. Tampoco esta
+    medido que el patron sea exactamente ausente-en-T1 y presente-en-T2: las consultas de elementos
+    dieron 401 en los DOS snapshots, asi que esa parte es inferencia, no medicion.
+  seguimientos:
+    - migrar el volcado a CamundaDataSource, la API que CamundaAssert usa internamente
+    - ampliar el catch de DisbursementWorker, cambio propio
   verify: pending
   archive: pending
 

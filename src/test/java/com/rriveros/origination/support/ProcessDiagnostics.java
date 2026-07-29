@@ -1,180 +1,63 @@
 package com.rriveros.origination.support;
 
 import com.rriveros.origination.domain.model.CreditApplication;
-import io.camunda.zeebe.client.ZeebeClient;
-import io.camunda.zeebe.client.api.search.response.FlowNodeInstance;
-import io.camunda.zeebe.client.api.search.response.Incident;
-import io.camunda.zeebe.client.api.search.response.ProcessInstance;
-import java.time.Duration;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
 import org.junit.jupiter.api.TestInfo;
 
 /**
- * Volcado diagnostico de solo lectura para {@code CreditOriginationProcessTest}, Fase A de
+ * Volcado diagnostico de solo lectura para {@code CreditOriginationProcessTest},
  * {@code fix-process-test-failures}.
+ *
+ * <p>Fase A incluia aca cuatro secciones adicionales (INSTANCE, ELEMENTS, INCIDENTS, EXPECTED)
+ * basadas en la search API tipada de {@code ZeebeClient} (8.7.6). El run real de CI de Fase A
+ * (PR1, commit {@code 0de59c1}) mostro que las tres consultas contra esa search API fallan con
+ * HTTP 401 en todo run: en Camunda 8.7 esa API la sirve la capa REST, que exige autenticacion, y
+ * el {@code ZeebeClient} que el test tiene autowired no la lleva -- a diferencia de la API de
+ * comandos/jobs por gRPC, que si funciona. Cada linea {@code DIAG-ERROR: 401} era ruido, no
+ * evidencia: aparecia incluso para elementos que una asercion exitosa de {@code CamundaAssert} ya
+ * habia confirmado por otra via (su {@code CamundaDataSource} interno, que no pasa por esa search
+ * API). Fase B elimina esas cuatro secciones en lugar de dejarlas fallando en cada run de CI.
+ *
+ * <p>Se conserva unicamente AGGREGATE: lee el agregado via el puerto de entrada
+ * {@code FindCreditApplicationUseCase} (JPA/H2), es independiente del cliente de Camunda, y fue
+ * la seccion que efectivamente cerro el diagnostico de Fase A (estados {@code REVERTED} y
+ * {@code DISBURSED} con ids consistentes en las 4 instancias observadas).
+ *
+ * <p>Seguimiento pendiente, fuera de alcance de este cambio: migrar a
+ * {@code io.camunda.process.test.impl.assertions.CamundaDataSource} restauraria INSTANCE/
+ * ELEMENTS/INCIDENTS sin depender de la search API REST, pero es una clase interna del jar de CPT
+ * sin constructor ni firma verificables sin compilar contra ella, y no debe viajar en el PR cuyo
+ * unico objetivo es poner CI en verde.
  *
  * <p>Invariantes que esta clase sostiene y que no se deben romper al modificarla:
  *
  * <ol>
- *   <li><b>Solo consultas.</b> Nunca emite un comando (nada de setVariables, publishMessage,
- *       activacion de jobs, increaseTime ni despliegues).
- *   <li><b>Sin espera condicional.</b> El unico delay es un {@code Thread.sleep} fijo e
- *       incondicional entre los dos disparos; no hay reintento hasta exito.
- *   <li><b>Nunca lanza.</b> Cada seccion esta envuelta por separado; una falla se imprime como
- *       linea {@code DIAG-ERROR} y no interrumpe el resto del volcado ni se propaga al test.
- *   <li><b>Camino uniforme.</b> Se invoca igual para los 4 tests, pasen o fallen. Sin ramas
- *       condicionales sobre el resultado del test.
+ *   <li><b>Solo lectura.</b> Nunca emite un comando.
+ *   <li><b>Nunca lanza.</b> La seccion esta envuelta en try/catch propio; una falla se imprime
+ *       como linea {@code DIAG-ERROR} y no se propaga al test.
  * </ol>
- *
- * <p>Utilitaria y estatica, sin anotaciones de Spring: no entra al contexto de la aplicacion y por
- * lo tanto no puede alterar el orden de arranque que se esta midiendo. Vive enteramente en test
- * scope y solo importa el lenguaje de frontera de {@code io.camunda.*}; no importa nada de
- * {@code domain/} salvo el propio agregado ya resuelto por el llamador via {@code
- * FindCreditApplicationUseCase}.
  */
 public final class ProcessDiagnostics {
 
     private static final String PREFIX = "DIAG |";
-    private static final Duration SECOND_SHOT_DELAY = Duration.ofSeconds(3);
 
     private ProcessDiagnostics() {}
 
     /**
-     * Emite dos disparos (T1 inmediato, T2 tras un delay fijo) del estado observable de una
-     * instancia de proceso. Pensado para invocarse desde {@code @AfterEach}, incluso cuando el
-     * metodo de test ya lanzo una {@link AssertionError}.
+     * Emite el estado del agregado para una instancia de proceso observada. Pensado para
+     * invocarse desde {@code @AfterEach}, incluso cuando el metodo de test ya lanzo una {@link
+     * AssertionError}.
      *
-     * @param zeebeClient cliente ya autowired por el test, nunca se cierra aca
      * @param testInfo info del test en curso, solo para el nombre en los marcadores
-     * @param processInstanceKey key de la instancia observada
-     * @param expectedElementIds ids que el test asertó como parte del camino esperado
+     * @param processInstanceKey key de la instancia observada, solo para correlacionar el bloque
+     *     con el resto del log de CI
      * @param aggregate estado del agregado ya resuelto por el llamador, o {@code null} si no se
      *     pudo resolver
      */
-    public static void dump(
-            ZeebeClient zeebeClient,
-            TestInfo testInfo,
-            long processInstanceKey,
-            List<String> expectedElementIds,
-            CreditApplication aggregate) {
+    public static void dump(TestInfo testInfo, long processInstanceKey, CreditApplication aggregate) {
         String testName = testInfo.getDisplayName();
-        shot(zeebeClient, testName, processInstanceKey, expectedElementIds, aggregate, "T1");
-        try {
-            Thread.sleep(SECOND_SHOT_DELAY.toMillis());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        shot(zeebeClient, testName, processInstanceKey, expectedElementIds, aggregate, "T2");
-    }
-
-    private static void shot(
-            ZeebeClient zeebeClient,
-            String testName,
-            long processInstanceKey,
-            List<String> expectedElementIds,
-            CreditApplication aggregate,
-            String shot) {
-        System.out.println("=== DIAG BEGIN " + testName + " pik=" + processInstanceKey + " shot=" + shot + " ===");
-        printInstance(zeebeClient, processInstanceKey);
-        List<FlowNodeInstance> elements = printElements(zeebeClient, processInstanceKey);
-        printIncidents(zeebeClient, processInstanceKey);
-        printExpected(elements, expectedElementIds);
+        System.out.println("=== DIAG BEGIN " + testName + " pik=" + processInstanceKey + " ===");
         printAggregate(aggregate);
-        System.out.println("=== DIAG END " + testName + " pik=" + processInstanceKey + " shot=" + shot + " ===");
-    }
-
-    private static void printInstance(ZeebeClient zeebeClient, long processInstanceKey) {
-        try {
-            // ProcessInstanceFilter (8.7.6) no expone un filtro por processInstanceKey: se trae la
-            // coleccion completa (diminuta en este escenario de test) y se reduce en el cliente.
-            List<ProcessInstance> items =
-                    zeebeClient.newProcessInstanceQuery().send().join().items();
-            Optional<ProcessInstance> instance = items.stream()
-                    .filter(pi -> pi.getKey() != null && pi.getKey().equals(processInstanceKey))
-                    .findFirst();
-            if (instance.isEmpty()) {
-                System.out.println(PREFIX + " INSTANCE | NOT_FOUND");
-                return;
-            }
-            ProcessInstance pi = instance.get();
-            System.out.println(PREFIX + " INSTANCE"
-                    + " | state=" + String.valueOf(pi.getState())
-                    + " | processDefinitionId=" + String.valueOf(pi.getBpmnProcessId())
-                    + " | processDefinitionKey=" + String.valueOf(pi.getProcessDefinitionKey())
-                    + " | processDefinitionVersion=" + String.valueOf(pi.getProcessVersion())
-                    + " | startDate=" + String.valueOf(pi.getStartDate())
-                    + " | endDate=" + String.valueOf(pi.getEndDate()));
-        } catch (Exception e) {
-            printError("INSTANCE", e);
-        }
-    }
-
-    private static List<FlowNodeInstance> printElements(ZeebeClient zeebeClient, long processInstanceKey) {
-        try {
-            List<FlowNodeInstance> elements = zeebeClient
-                    .newFlownodeInstanceQuery()
-                    .filter(f -> f.processInstanceKey(processInstanceKey))
-                    .send()
-                    .join()
-                    .items()
-                    .stream()
-                    .sorted(Comparator
-                            .comparing((FlowNodeInstance f) -> Optional.ofNullable(f.getStartDate()).orElse(""))
-                            .thenComparing(f -> Optional.ofNullable(f.getFlowNodeInstanceKey()).orElse(0L)))
-                    .toList();
-            if (elements.isEmpty()) {
-                System.out.println(PREFIX + " ELEMENTS | (vacio)");
-            }
-            for (FlowNodeInstance element : elements) {
-                System.out.println(PREFIX + " ELEMENTS"
-                        + " | elementId=" + String.valueOf(element.getFlowNodeId())
-                        + " | state=" + String.valueOf(element.getState())
-                        + " | start=" + String.valueOf(element.getStartDate())
-                        + " | end=" + String.valueOf(element.getEndDate())
-                        + " | key=" + String.valueOf(element.getFlowNodeInstanceKey()));
-            }
-            return elements;
-        } catch (Exception e) {
-            printError("ELEMENTS", e);
-            return List.of();
-        }
-    }
-
-    private static void printIncidents(ZeebeClient zeebeClient, long processInstanceKey) {
-        try {
-            List<Incident> incidents = zeebeClient
-                    .newIncidentQuery()
-                    .filter(f -> f.processInstanceKey(processInstanceKey))
-                    .send()
-                    .join()
-                    .items();
-            if (incidents.isEmpty()) {
-                System.out.println(PREFIX + " INCIDENTS | (vacio)");
-            }
-            for (Incident incident : incidents) {
-                System.out.println(PREFIX + " INCIDENTS"
-                        + " | elementId=" + String.valueOf(incident.getFlowNodeId())
-                        + " | errorType=" + String.valueOf(incident.getErrorType())
-                        + " | errorMessage=" + String.valueOf(incident.getErrorMessage())
-                        + " | state=" + String.valueOf(incident.getState())
-                        + " | creationTime=" + String.valueOf(incident.getCreationTime()));
-            }
-        } catch (Exception e) {
-            printError("INCIDENTS", e);
-        }
-    }
-
-    private static void printExpected(List<FlowNodeInstance> elements, List<String> expectedElementIds) {
-        try {
-            for (String expectedId : expectedElementIds) {
-                boolean present = elements.stream().anyMatch(e -> expectedId.equals(e.getFlowNodeId()));
-                System.out.println(PREFIX + " EXPECTED | " + expectedId + " | " + (present ? "OK" : "MISSING"));
-            }
-        } catch (Exception e) {
-            printError("EXPECTED", e);
-        }
+        System.out.println("=== DIAG END " + testName + " pik=" + processInstanceKey + " ===");
     }
 
     private static void printAggregate(CreditApplication aggregate) {
@@ -192,7 +75,16 @@ public final class ProcessDiagnostics {
         }
     }
 
-    private static void printError(String section, Exception e) {
+    /**
+     * Imprime una linea {@code DIAG-ERROR} con el mismo formato que usan las secciones internas
+     * de esta clase. Publica para que otros puntos de solo lectura del test (p. ej. el
+     * {@code findApplication.findById(...)} de {@code @AfterEach}) sostengan el mismo invariante
+     * "nunca lanza" sin duplicar el formato de linea.
+     *
+     * @param section nombre de la seccion que fallo, para el prefijo de la linea
+     * @param e excepcion capturada; nunca se relanza
+     */
+    public static void printError(String section, Exception e) {
         System.out.println(PREFIX + " " + section + " | DIAG-ERROR: "
                 + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
     }
