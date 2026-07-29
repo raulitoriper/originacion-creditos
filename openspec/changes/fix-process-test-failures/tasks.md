@@ -96,6 +96,67 @@ cambió nada: esto **no es un problema de tiempo/espera**. La causa real sigue s
 - [ ] 4.6 Confirmar cierre válido: 58/58, `conclusion=success`, registrar URL; una inferencia local no se acepta como evidencia. (Spec: Cierre de Fase B con evidencia real de CI). Verificable: CI-only. **Pendiente — depende de 4.5.**
 - [x] 4.7 Confirmar que ningún commit de A o B introdujo `continue-on-error`, `-Dtest=`, `@Disabled` ni aserciones debilitadas. (Spec: Prohibiciones sobre cómo se alcanza el verde). Verificable: local por inspección del diff. Confirmado por inspección de `git diff`: sin `continue-on-error`, sin `-Dtest=`, sin `@Disabled`, sin `assumeTrue`, ningún id ni aserción de elemento removida o debilitada — el único cambio de comportamiento de aserción es ampliar el timeout global de `CamundaAssert`.
 
+### Diagnóstico ronda 3 (causa raíz probada a nivel bytecode — corrección aditiva por búsqueda REST acotada)
+
+Causa raíz confirmada con `javap` contra `camunda-process-test-java-8.7.6.jar` (ya no es hipótesis):
+`CamundaDataSource.getFlowNodeInstancesByProcessInstanceKey(long)` delega en
+`CamundaApiClient.findFlowNodeInstancesByProcessInstanceKey(long)`, que arma el cuerpo del POST a
+`/v1/flownode-instances/search` desde una constante de compilación sin `size` ni `page` — el broker
+responde con su página por defecto de 10 filas. `FlowNodeInstancesResponseDto.total` existe pero
+`CamundaDataSource` lo descarta y devuelve solo `.getItems()`. Correlación confirmada en el dump de
+CI (run 30470024764): Zona gris 8 elementos (pasa), Mora vigente 6 (pasa), Compensación 10
+(falla, elementos 11/12/13 ausentes), Score alto 10 (falla, elemento 11 ausente). El proceso es
+correcto: `Activity_DisburseLoan` queda `TERMINATED` y `Boundary_DisbursementFailed` `COMPLETED` en
+el dump de compensación — la firma de un error BPMN atrapado por su boundary. Ids no observables:
+`EndEvent_Disbursed` (camino feliz) y `Event_CompensateOrigination`, `Activity_ReleaseFunds`,
+`EndEvent_DisbursementFailed` (compensación).
+
+- [x] 6.1 Crear `FlowNodeElementProbe.java` (test scope, `support`): helper de solo lectura que hace
+      login propio (`POST {restAddress}/api/login?username=demo&password=demo`) con Apache
+      HttpClient 5 (`CloseableHttpClient` + `HttpClientContext`/`BasicCookieStore` explícitos para
+      sostener la sesión) y consulta `POST {restAddress}/v1/flownode-instances/search` con filtro
+      `{"filter":{"processInstanceKey":...,"flowNodeId":"..."}}` — acotado a un id de elemento a la
+      vez, a lo sumo 1 fila, muy por debajo de cualquier tamaño de página. Parseo con Jackson
+      (`ObjectMapper.readTree`). Nunca lanza: cualquier fallo (login, red, parseo) se devuelve como
+      `Result` con `failureDetail` no nulo, incluyendo HTTP status, `total`, cantidad de items y el
+      cuerpo crudo (truncado a 500 caracteres). Todos los tipos de HttpClient5/Jackson verificados
+      con `javap` contra los jars reales antes de escribir código (`httpclient5-5.4.4.jar`,
+      `httpcore5-5.3.4.jar`, `jackson-databind-2.18.4.jar`). Javadoc de la clase documenta la causa
+      raíz completa con sus números. (Alcance: item 1 y 5 del prompt de apply). Verificable: local
+      por compilación.
+- [x] 6.2 Usar `FlowNodeElementProbe` en `CreditOriginationProcessTest`: nuevo helper privado
+      `assertTailElementCompleted(long, String)` que construye la sonda con
+      `processTestContext.getCamundaRestAddress()` (protegido con try/catch, nunca propaga NPE),
+      imprime una línea `DIAG | TAIL_ELEMENT | ...` con el detalle observado (para que el log de CI
+      muestre HTTP status/total/items/cuerpo incluso si la aserción falla) y luego afirma
+      `result.state()` == `"COMPLETED"` vía AssertJ con `.as(...)` describiendo el detalle
+      diagnóstico completo. Invocado para los 4 ids no observables: `EndEvent_Disbursed` (test "Score
+      alto") y `Event_CompensateOrigination`, `Activity_ReleaseFunds`, `EndEvent_DisbursementFailed`
+      (test "Desembolso rechazado"). (Alcance: item 2 del prompt de apply). Verificable: local por
+      compilación.
+- [x] 6.3 Interpretación deliberada de "aditivo" (documentada, no silenciosa): se retiraron
+      exclusivamente esos 4 ids de sus respectivas llamadas `hasCompletedElements(...)` (el resto de
+      ids, orden y severidad de esas llamadas queda intacto) porque, dada la causa raíz de 6.1/ronda
+      3, es matemáticamente imposible que `hasCompletedElements` los vea alguna vez — mantenerlos ahí
+      garantizaría que el test siga fallando en esa línea sin importar qué se agregue después. Los 4
+      ids se re-verifican de inmediato con `assertTailElementCompleted`, misma severidad (aserción
+      dura), mecanismo distinto. No se relajó ninguna cobertura: se reubicó. `hasTerminatedElements`
+      y el resto de `hasCompletedElements` (Zona gris, Mora vigente, y los ids de Score
+      alto/Compensación que sí caen en las primeras 10 filas) quedan sin tocar. Verificable: local
+      por inspección de `git diff`.
+- [x] 6.4 Compuerta local: `mvn -B test-compile` → `BUILD SUCCESS`; `mvn -B test
+      -Dtest=CreditApplicationTest` → 54/54 verde, sin relación con este cambio. `git diff --stat`
+      confirma que solo se tocó `CreditOriginationProcessTest.java` (modificado) y
+      `FlowNodeElementProbe.java` (nuevo) dentro de `src/test/**`; sin `continue-on-error`,
+      `-Dtest=`, `@Disabled` ni `assumeTrue` en el diff. Verificable: 100% local.
+- [ ] 6.5 CI-only, acción del orquestador: disparar el run y leer si `flowNodeId` es un filtro
+      aceptado por el broker y si el login se comporta como está documentado. Si las 2 fallas
+      desaparecen y el resto del suite sigue en 58/58 → corrección confirmada. Si la sonda misma
+      falla (login, filtro rechazado, parseo), la línea `DIAG | TAIL_ELEMENT` y el mensaje de
+      `.as(...)` de AssertJ deben traer HTTP status + `total` + cuerpo crudo suficientes para decidir
+      sin otra corrida si hay que caer al fallback de simplemente quitar esos ids sin reemplazo.
+      Pendiente — depende de CI real.
+
 ## Phase 5: Cierre (bloqueado hasta el run verde real)
 
 - [ ] 5.1 No tocar la fila «Tests de proceso ejecutados» del README hasta 4.6 cerrado en verde; queda fuera de alcance de este checklist y de `ci-and-domain-tests` fase 5. (Spec: Prohibiciones). Verificable: local por inspección.

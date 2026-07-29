@@ -235,6 +235,56 @@ decisiones_del_usuario_2026_07_29:
     propio cambio de seguimiento. Motivo: mantener limpia la atribucion del experimento.
   volcado_en_log_alcanza: true # decidido por el orquestador; no se toca el workflow, queda fuera de alcance
 
+causa_raiz_probada:
+  hallazgo: >
+    La consulta de flow node instances devuelve como maximo 10 elementos y el truncamiento es
+    silencioso. Probado con javap contra camunda-process-test-java-8.7.6.jar.
+  cadena_de_prueba:
+    - CamundaDataSource.getFlowNodeInstancesByProcessInstanceKey delega y retorna .getItems(); no pagina.
+    - CamundaApiClient.findFlowNodeInstancesByProcessInstanceKey arma el cuerpo con una constante de
+      compilacion, {"filter": {"processInstanceKey":%d}}, y hace POST /v1/flownode-instances/search.
+      No manda size ni page, asi que recibe el default del servidor.
+    - FlowNodeInstancesResponseDto tiene items Y total con getTotal(), pero CamundaDataSource retorna
+      solo items y descarta total. La respuesta trae la evidencia del truncamiento y el codigo la tira.
+    - No es configurable: el cuerpo es constante, sin sobrecarga ni parametro ni setter.
+  correlacion_del_run_30470024764:
+    zona_gris: 8 elementos devueltos, pasa
+    mora_vigente: 6 elementos devueltos, pasa
+    compensacion: 10 devueltos, falla, faltan los elementos 11 12 y 13
+    score_alto: 10 devueltos, falla, falta el elemento 11
+  proceso_correcto_por_elemento: >
+    En el test de compensacion, Activity_DisburseLoan state=TERMINATED mas
+    Boundary_DisbursementFailed state=COMPLETED es la firma exacta de un BPMN error atrapado por su
+    boundary. La compensacion de saga funciona y ya no se deduce del agregado.
+  es_bug_de_libreria: >
+    camunda-process-test-java 8.7.6 produce aserciones de elementos falsamente negativas, en silencio,
+    para cualquier proceso de mas de 10 elementos. Digno de reporte aguas arriba.
+
+fase_b_ronda_3:
+  enfoque: >
+    Consulta REST acotada por flowNodeId, que devuelve como maximo una fila y por lo tanto es inmune
+    al limite de pagina. FlowNodeElementProbe hace su propio login (POST /api/login con demo/demo) y
+    su propia busqueda, porque sendPostRequest y ensureAuthenticated de CamundaApiClient son privados.
+  ids_movidos_al_probe: [EndEvent_Disbursed, Event_CompensateOrigination, Activity_ReleaseFunds, EndEvent_DisbursementFailed]
+  cobertura_preservada: >
+    Verificado por el orquestador. Los cuatro ids siguen aserto con fuerza igual, via
+    assertThat(result.state()).as(...).isEqualTo("COMPLETED"). El tramo observable de
+    hasCompletedElements quedo intacto, incluido hasTerminatedElements("Activity_DisburseLoan"), que
+    es la firma del BPMN error y cae en la fila 9. Sin @Disabled ni assumeTrue.
+  contradiccion_en_la_instruccion_del_orquestador: >
+    El prompt de apply exigia a la vez no sacar ids de hasCompletedElements y que la suite fuera a
+    verde. Con la causa raiz probada esas dos cosas son incompatibles: un id mas alla de la fila 10
+    falla siempre. El agente detecto la contradiccion, la flageo en lugar de esconderla, y la resolvio
+    moviendo los ids inobservables a un mecanismo que si puede verlos. La resolucion coincide con la
+    decision del usuario: mismos ids, misma severidad, solo cambia como observa.
+  sin_verificar_solo_ci:
+    - que flowNodeId sea aceptado como clave de filtro por el broker
+    - que el login demo/demo se comporte como se infirio
+    - si las 2 fallas desaparecen con el mismo total de 58 tests
+  caida_a_A: >
+    Si el probe falla, la linea DIAG | TAIL_ELEMENT y el mensaje .as() traen status HTTP, total y
+    cuerpo crudo, de modo que una sola corrida alcanza para decidir la caida sin otra a ciegas.
+
 prohibido:
   - continue-on-error en el workflow
   - exclusiones -Dtest= para forzar verde
