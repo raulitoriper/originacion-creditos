@@ -49,6 +49,47 @@ confirmar con el usuario la estrategia de cadena antes de aplicar, aunque el rie
 
 - [x] 4.1 Implementar el fix únicamente en el área que indicó 3.5; no presuponer causa ni empezar antes de tener esa clasificación. (Spec: Corrección de Fase B guiada por la tabla de decisión). Verificable: local (compilación) + CI (comportamiento). **Clasificación** (a partir del run PR1/`0de59c1`, sección `AGGREGATE`: `REVERTED` con ambos ids nulos y `DISBURSED` con `disbursementId` real en las 4 instancias — el proceso terminó correctamente en los 4 escenarios): fila "COMPLETED con timestamp anterior a la falla" (tabla de decisión de `spec.md`) / fila 1 de `design.md` Decisión 6 ("`ELEMENTS` de T1 no contiene el sufijo y `ELEMENTS` de T2 sí" — patrón consistente con lo observado). Área del fix: estrategia de aserción del test, no el modelo. Local (compilación): confirmado. CI (comportamiento): **no verificable en este batch**, ver Phase 4.5/4.6.
 - [x] 4.2 Fila aplicable: "timestamp anterior a la falla". Ajustado solo cómo y cuándo observa el test: `CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20))` en un `@BeforeAll` de `CreditOriginationProcessTest`, verificado con `javap` contra `camunda-process-test-java-8.7.6.jar` antes de escribir el código (`setAssertionTimeout` invoca `Awaitility.setDefaultTimeout`; default `DEFAULT_ASSERTION_TIMEOUT` = 10 s; confirmado que `CamundaProcessTestExecutionListener` no resetea ese valor entre tests, solo `CamundaAssert.initialize`/`reset` del data source). Mismos ids, misma severidad de asercion, BPMN sin tocar. (Spec: Corrección de Fase B guiada por la tabla de decisión). Verificable: local (compilación, hecho) + CI (comportamiento — **CI-only, no verificable aquí**).
+
+### Diagnóstico ronda 2 (revisión de 4.1/4.2 — el CI refutó la hipótesis de timeout)
+
+El run 30466947115 (commit `466c6d5`) ejecutó el timeout de 20 s de 4.2 en CI real: `conclusion=failure`,
+mismas 2 fallas, mismos elementos ausentes, 255 s de duración. La clasificación de 4.1 ("COMPLETED con
+timestamp anterior a la falla") queda **refutada por evidencia de CI**, no solo por hipótesis. Refutación
+adicional por bytecode (`javap` contra los jars reales): ni `CamundaProcessTestExecutionListener` ni
+`CamundaAssert.reset()` invocan `setAssertionTimeout` o `Awaitility` en ningún punto — `reset()` solo hace
+`DATA_SOURCE.remove()` sobre un `ThreadLocal`. El timeout de 20 s SÍ estuvo vigente durante todo el run y no
+cambió nada: esto **no es un problema de tiempo/espera**. La causa real sigue sin conocerse.
+
+- [x] 4.1r2 Extender `ProcessDiagnostics` para volcar `INSTANCE` (estado de la instancia, versión,
+      fechas), `ELEMENTS` (TODOS los flow node instances devueltos, sin filtrar contra ids
+      esperados — id, estado, fechas, flag de incidente) y `VARIABLES`, leyendo desde
+      `io.camunda.process.test.impl.assertions.CamundaDataSource` — la misma clase interna que usa
+      `CamundaAssert` para resolver sus propias aserciones. Accessors de `ProcessInstanceDto`,
+      `FlowNodeInstanceDto` y `VariableDto` verificados con `javap` contra el jar real antes de
+      escribir el código. Se conserva `AGGREGATE` sin cambios. Dependencia deliberada y temporal de
+      paquetes `impl` (API interna del jar de CPT, sin garantía de compatibilidad) — documentado en
+      el Javadoc de la clase como no permanente. (Spec: Volcado diagnóstico de Fase A, extendido).
+      Verificable: local por compilación.
+- [x] 4.2r2 Conectar la dirección REST del broker (`CamundaProcessTestContext.getCamundaRestAddress()`,
+      ya autowired como `processTestContext`) al `dump(...)` de `ProcessDiagnostics` para construir el
+      `CamundaDataSource` de solo lectura. Verificable: local por compilación.
+- [x] 4.3r2 Agregar `@AfterAll restoreAssertionTimeout()` en `CreditOriginationProcessTest` que llama
+      `CamundaAssert.setAssertionTimeout(CamundaAssert.DEFAULT_ASSERTION_TIMEOUT)`. Cierra el hallazgo
+      de dos lentes de revisión: `setAssertionTimeout` muta un default global de Awaitility sin reset,
+      y `pom.xml` no tiene override de fork de surefire, así que `reuseForks=true` (por defecto)
+      aplica y el valor mutado sobreviviría entre clases de test en el mismo fork. Verificable: local
+      por compilación.
+- [x] 4.4r2 Corregir el comentario de `configureAssertionTimeout()`: ya no afirma que el volcado de
+      Fase A "confirmó el patrón ausente en T1 / presente en T2" (nunca se midió — las consultas de
+      elementos devolvían 401 en ambos disparos — y es además incorrecto: el timeout estuvo vigente y
+      no cambió nada). Reescrito para decir que el timeout se probó, se refutó como causa por
+      evidencia de CI y por bytecode, y se conserva solo a la espera del arreglo real. Verificable:
+      local por inspección.
+- [x] 4.5r2 Compuerta local: `mvn -B test-compile` → `BUILD SUCCESS` primer intento;
+      `mvn -B test -Dtest=CreditApplicationTest` → 54/54 verde, sin relación con este cambio. Este
+      diagnóstico **debe seguir fallando en CI** con las mismas 2 fallas — un verde invalidaría la
+      medición; no se tocó ninguna aserción, id ni severidad. Verificable: local. CI (round 2):
+      **pendiente, CI-only, acción del orquestador.**
 - [ ] 4.3 Fila aplicable: no aplica. La sección `AGGREGATE` del run PR1 (`REVERTED` con `reservationId`/`disbursementId` nulos, producido solo por `releaseFunds()` tras `FundsReleaseWorker`) prueba que la compensación ejecutó de punta a punta; un incidente técnico en `disburse-loan` habría impedido esa compensación. **Diferido a un cambio de seguimiento propio**, no se ejecuta en este cambio; `DisbursementWorker` no se toca. (Spec: Prohibiciones / defecto diferido). Verificable: local + CI. **No aplicó** por la razón anterior.
 - [x] 4.4 Ejecutar la compuerta de 2.1 antes de cualquier push del fix. Verificable: 100% local. Ejecutado tras los cambios de Fase B: `BUILD SUCCESS` (ver Work Unit Evidence).
 - [ ] 4.5 Abrir PR2 (base: main tras merge de PR1) y disparar el run de CI. (Spec: Cierre de Fase B con evidencia real de CI). Verificable: CI-only. **Pendiente — acción del orquestador, no de este batch de apply.**

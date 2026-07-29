@@ -22,6 +22,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -73,19 +74,30 @@ class CreditOriginationProcessTest {
     // diagnostico de Fase A; no participa de ninguna asercion.
     private final List<ObservedInstance> observedInstances = new ArrayList<>();
 
-    // Fase B (fix-process-test-failures): el run de CI de Fase A (PR1, commit 0de59c1) probo, via
-    // la seccion AGGREGATE del volcado, que las 4 instancias completan correctamente (REVERTED con
-    // ids nulos, DISBURSED con ids reales). Sin embargo 2 de los 4 tests seguian fallando en
-    // hasCompletedElements para elementos tardios del camino esperado. El timeout de asercion por
-    // defecto de CamundaAssert (10 s, Awaitility) expiraba antes de que la vista exportada
-    // reflejara esos elementos; el volcado de Fase A confirmo el patron "ausente en T1 (a los
-    // ~10 s), presente en T2 (a los ~13 s)" para exactamente esos sufijos, lo que ubica el defecto
-    // en la fila "COMPLETED con timestamp anterior a la falla" de la tabla de decision: estrategia
-    // de asercion del test, no el modelo. Se amplia el timeout una sola vez para toda la clase;
-    // mismos ids, misma severidad de asercion, el BPMN no se toca.
+    // Fase B (fix-process-test-failures), diagnostico ronda 2: este timeout de 20 s SE PROBO en CI
+    // (run 30466947115, commit 466c6d5) y NO cambio nada -- mismas 2 fallas, mismos elementos
+    // ausentes, 255 s de duracion total. Ademas se descarto por bytecode (javap contra los jars
+    // reales de camunda-process-test-java y camunda-process-test-spring) que
+    // CamundaProcessTestExecutionListener o CamundaAssert.reset() invoquen setAssertionTimeout o
+    // Awaitility en algun punto: reset() solo hace DATA_SOURCE.remove() sobre un ThreadLocal. El
+    // timeout de 20 s estuvo vigente durante todo ese run y los elementos igual no fueron
+    // observables: queda establecido que esto NO es un problema de tiempo/espera. Se conserva este
+    // @BeforeAll unicamente a la espera del arreglo real -- que el volcado de la ronda 2 via
+    // CamundaDataSource (ver ProcessDiagnostics) debe permitir identificar -- y se revierte con
+    // restoreAssertionTimeout() para no dejar mutado un default global de Awaitility entre clases
+    // de test (surefire usa reuseForks=true por defecto, sin override en pom.xml).
     @BeforeAll
     static void configureAssertionTimeout() {
         CamundaAssert.setAssertionTimeout(Duration.ofSeconds(20));
+    }
+
+    // Revierte el timeout global de Awaitility que configureAssertionTimeout() establecio arriba.
+    // CamundaProcessTestExecutionListener no lo resetea entre tests (verificado por javap), y sin
+    // fork por clase el valor mutado sobreviviria a esta clase y contaminaria la siguiente que
+    // corra en el mismo fork si no se restaura aca.
+    @AfterAll
+    static void restoreAssertionTimeout() {
+        CamundaAssert.setAssertionTimeout(CamundaAssert.DEFAULT_ASSERTION_TIMEOUT);
     }
 
     @BeforeEach
@@ -103,8 +115,20 @@ class CreditOriginationProcessTest {
     // Fase B: findApplication.findById() se protege con try/catch, mismo patron que
     // ProcessDiagnostics.printError -- una falla aca no debe agregar una falla espuria dentro de
     // @AfterEach ni desplazar la AssertionError real del metodo de test.
+    //
+    // Diagnostico ronda 2: se pasa la direccion REST del broker (processTestContext, ya autowired)
+    // para que ProcessDiagnostics pueda construir su propio CamundaDataSource de solo lectura.
     @AfterEach
     void dumpDiagnostics(TestInfo testInfo) {
+        // Tambien protegido: getCamundaRestAddress() puede fallar o devolver null, y una NPE aca
+        // escaparia del @AfterEach. Si no se resuelve, el volcado sigue con las secciones que no
+        // dependen del broker.
+        String camundaRestAddress = null;
+        try {
+            camundaRestAddress = processTestContext.getCamundaRestAddress().toString();
+        } catch (Exception e) {
+            ProcessDiagnostics.printError("DATASOURCE", e);
+        }
         for (ObservedInstance observed : observedInstances) {
             CreditApplication aggregate = null;
             try {
@@ -112,7 +136,7 @@ class CreditOriginationProcessTest {
             } catch (Exception e) {
                 ProcessDiagnostics.printError("AGGREGATE", e);
             }
-            ProcessDiagnostics.dump(testInfo, observed.processInstanceKey(), aggregate);
+            ProcessDiagnostics.dump(testInfo, observed.processInstanceKey(), aggregate, camundaRestAddress);
         }
     }
 
