@@ -27,6 +27,19 @@ Si tenés cinco minutos, mirá estos tres archivos en este orden:
 para bureau y core bancario. Ver [Límites conocidos](#límites-conocidos) — están listados, no
 escondidos.
 
+### Si te interesa el razonamiento y no solo el resultado
+
+`openspec/changes/` guarda el rastro completo de cada cambio: exploración, propuesta, especificación,
+diseño, tareas y estado. No es documentación decorativa, es el registro de por qué cada decisión salió
+como salió, con las hipótesis que se refutaron en el camino.
+
+El más interesante es [`fix-process-test-failures`](openspec/changes/fix-process-test-failures/): dos
+tests de proceso fallaban de forma determinista, y el diagnóstico refutó tres explicaciones antes de
+encontrar la real — un límite de paginación de 10 elementos en `camunda-process-test-java` 8.7.6 que
+trunca la consulta en silencio. Está [reportado aguas
+arriba](https://github.com/camunda/camunda/issues/56274#issuecomment-5121361754). El proceso nunca
+estuvo roto; lo que fallaba era cómo el test lo observaba.
+
 ---
 
 ## Arrancarlo en 3 pasos
