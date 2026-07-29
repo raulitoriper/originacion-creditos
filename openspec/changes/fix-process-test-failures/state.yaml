@@ -13,7 +13,41 @@ phases:
   specs: done
   design: done
   tasks: done
-  apply: fase_b_done # pendiente de evidencia real de CI
+  apply: done
+  verify: done_por_ci
+
+resultado_final:
+  run: https://github.com/raulitoriper/originacion-creditos/actions/runs/30472808007
+  commit: 3af057f
+  conclusion: success
+  tests: 58/58, 0 fallas
+  evidencia_del_probe: >
+    Las cuatro consultas acotadas devolvieron state=COMPLETED httpStatus=200 total=1 itemCount=1 para
+    Event_CompensateOrigination, Activity_ReleaseFunds, EndEvent_DisbursementFailed y
+    EndEvent_Disbursed. total=1 en las cuatro confirma que el filtro por flowNodeId devuelve una sola
+    fila y es inmune al limite de pagina de 10.
+  confirmado_por_ejecucion:
+    - flowNodeId ES clave de filtro aceptada por /v1/flownode-instances/search
+    - el login POST /api/login?username=demo&password=demo funciona como se infirio
+    - los timeouts acotados no produjeron flake: 10 s alcanzo
+  compensacion_probada_elemento_por_elemento: >
+    Ya no se deduce del agregado. Event_CompensateOrigination, Activity_ReleaseFunds y
+    EndEvent_DisbursementFailed en COMPLETED, mas Activity_DisburseLoan en TERMINATED y
+    Boundary_DisbursementFailed en COMPLETED del volcado anterior. Es la tesis central del README con
+    evidencia ejecutada detras.
+  costo_del_diagnostico: 6 corridas de CI, 3 hipotesis refutadas, 1 CRITICAL atajado, 5 recibos aprobados
+
+fase_5_readme:
+  desbloqueada_por: el run verde real, como estaba especificado desde el principio
+  cambios:
+    - badge de CI sobre main, arriba del titulo
+    - fila «Tests de proceso ejecutados» pasa de ❌ a ✅ 58/58 en CI con link al run
+    - fila nueva en Limites conocidos documentando el bug de paginacion de CPT 8.7.6 y por que
+      existe FlowNodeElementProbe, con la advertencia explicita de no borrarlo
+    - fila Tests de Limites conocidos actualizada: corre en CI, sigue bloqueado localmente
+    - conteo de fuentes corregido de 38 a 37 de produccion mas 4 de test, verificado con mvn
+    - seccion Tests menciona los 54 unitarios de dominio sin Docker
+    - Proximo paso reescrito: reportar el bug aguas arriba primero
 
 resultado_fase_a:
   run: https://github.com/raulitoriper/originacion-creditos/actions/runs/30464756832
