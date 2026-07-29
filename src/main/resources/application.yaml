@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: originacion-creditos
+  datasource:
+    url: jdbc:postgresql://localhost:5432/originacion
+    username: originacion
+    password: originacion
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway es el dueno del esquema. Hibernate solo valida.
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+# Prefijo real del SDK 8.7 (io.camunda.zeebe.spring.client.properties.CamundaClientProperties)
+camunda:
+  client:
+    mode: self-managed
+    zeebe:
+      grpc-address: http://localhost:26500
+      rest-address: http://localhost:8088
+      execution-threads: 4
+
+origination:
+  ledger:
+    # Por encima de este monto el ledger rechaza el desembolso.
+    # Sirve para disparar el camino de compensacion en la demo.
+    disbursement-limit: 150000000
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    com.rriveros.origination: DEBUG

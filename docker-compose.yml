@@ -1,0 +1,100 @@
+name: originacion-creditos
+
+# Camunda 8.7 Self-Managed, version minima: Zeebe + Operate + Tasklist + Elasticsearch.
+# Sin Identity/Keycloak a proposito: para una demo local agregan tres contenedores y
+# cero valor. Operate y Tasklist quedan con el usuario por defecto demo / demo.
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: originacion-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks: [camunda]
+
+  zeebe:
+    image: camunda/zeebe:8.7.6
+    container_name: originacion-zeebe
+    ports:
+      - "26500:26500"   # gRPC: por aca hablan los job workers
+      - "8088:8080"     # REST API v2
+      - "9600:9600"     # monitoring / health
+    environment:
+      - ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_CLASSNAME=io.camunda.zeebe.exporter.ElasticsearchExporter
+      - ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_ARGS_URL=http://elasticsearch:9200
+      - ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_ARGS_BULK_SIZE=1
+      - ZEEBE_BROKER_BACKPRESSURE_ENABLED=false
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9600/actuator/health/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks: [camunda]
+
+  operate:
+    image: camunda/operate:8.7.6
+    container_name: originacion-operate
+    ports:
+      - "8081:8080"
+    environment:
+      - CAMUNDA_OPERATE_ZEEBE_GATEWAYADDRESS=zeebe:26500
+      - CAMUNDA_OPERATE_ZEEBE_RESTADDRESS=http://zeebe:8080
+      - CAMUNDA_OPERATE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - CAMUNDA_OPERATE_ZEEBEELASTICSEARCH_URL=http://elasticsearch:9200
+      - MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE=health
+    depends_on:
+      zeebe:
+        condition: service_healthy
+    networks: [camunda]
+
+  tasklist:
+    image: camunda/tasklist:8.7.6
+    container_name: originacion-tasklist
+    ports:
+      - "8082:8080"
+    environment:
+      - CAMUNDA_TASKLIST_ZEEBE_GATEWAYADDRESS=zeebe:26500
+      - CAMUNDA_TASKLIST_ZEEBE_RESTADDRESS=http://zeebe:8080
+      - CAMUNDA_TASKLIST_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - CAMUNDA_TASKLIST_ZEEBEELASTICSEARCH_URL=http://elasticsearch:9200
+      - MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE=health
+    depends_on:
+      zeebe:
+        condition: service_healthy
+    networks: [camunda]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: originacion-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: originacion
+      POSTGRES_USER: originacion
+      POSTGRES_PASSWORD: originacion
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U originacion -d originacion"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [camunda]
+
+volumes:
+  postgres-data:
+
+networks:
+  camunda:
