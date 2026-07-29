@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.cookie.BasicCookieStore;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
@@ -12,6 +13,7 @@ import org.apache.hc.core5.http.ClassicHttpResponse;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
+import org.apache.hc.core5.util.Timeout;
 
 /**
  * Sondeo REST de solo lectura para un unico flow node instance, usado por {@code
@@ -89,8 +91,17 @@ public final class FlowNodeElementProbe {
             return Result.failure(-1, null, 0, "camundaRestAddress es null: no se pudo resolver la"
                     + " direccion REST del broker (CamundaProcessTestContext.getCamundaRestAddress())");
         }
+        // Timeouts acotados a proposito. Sin RequestConfig, HttpClient 5 deja responseTimeout sin
+        // limite: si el broker acepta el TCP y no responde nunca, esta sonda colgaria en vez de
+        // fallar, y eso derrota su unico proposito -- que el mensaje de falla alcance para decidir
+        // sin gastar otra corrida de CI. Una falla rapida informa; un cuelgue no informa nada.
         try (CloseableHttpClient httpClient = HttpClients.custom()
                 .setDefaultCookieStore(new BasicCookieStore())
+                .setDefaultRequestConfig(RequestConfig.custom()
+                        .setConnectTimeout(Timeout.ofSeconds(5))
+                        .setConnectionRequestTimeout(Timeout.ofSeconds(5))
+                        .setResponseTimeout(Timeout.ofSeconds(10))
+                        .build())
                 .build()) {
             HttpClientContext context = HttpClientContext.create();
             int loginStatus = login(httpClient, context);
