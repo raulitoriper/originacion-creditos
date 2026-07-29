@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:dmndi="https://www.omg.org/spec/DMN/20191111/DMNDI/"
+             xmlns:dc="http://www.omg.org/spec/DMN/20180521/DC/"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             id="Definitions_CreditScoring"
+             name="Politica de riesgo crediticio"
+             namespace="http://camunda.org/schema/1.0/dmn"
+             exporter="Camunda Modeler"
+             exporterVersion="5.28.0"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.7.0">
+
+  <decision id="credit_scoring" name="Scoring crediticio">
+    <decisionTable id="DecisionTable_CreditScoring" hitPolicy="FIRST">
+
+      <input id="Input_BureauScore" label="Score de bureau">
+        <inputExpression id="InputExpression_BureauScore" typeRef="number">
+          <text>bureauScore</text>
+        </inputExpression>
+      </input>
+      <input id="Input_ActiveDefaults" label="Mora activa">
+        <inputExpression id="InputExpression_ActiveDefaults" typeRef="boolean">
+          <text>hasActiveDefaults</text>
+        </inputExpression>
+      </input>
+      <input id="Input_InstallmentRatio" label="Cuota / ingreso mensual">
+        <inputExpression id="InputExpression_InstallmentRatio" typeRef="number">
+          <text>installmentToIncomeRatio</text>
+        </inputExpression>
+      </input>
+
+      <output id="Output_Decision" label="Decision de riesgo" typeRef="string" />
+
+      <rule id="Rule_ActiveDefaults">
+        <description>Mora vigente: rechazo automatico</description>
+        <inputEntry id="Rule1_Score"><text></text></inputEntry>
+        <inputEntry id="Rule1_Defaults"><text>true</text></inputEntry>
+        <inputEntry id="Rule1_Ratio"><text></text></inputEntry>
+        <outputEntry id="Rule1_Out"><text>"REJECTED"</text></outputEntry>
+      </rule>
+
+      <rule id="Rule_ScoreTooLow">
+        <description>Score por debajo del piso de la politica</description>
+        <inputEntry id="Rule2_Score"><text>&lt; 500</text></inputEntry>
+        <inputEntry id="Rule2_Defaults"><text></text></inputEntry>
+        <inputEntry id="Rule2_Ratio"><text></text></inputEntry>
+        <outputEntry id="Rule2_Out"><text>"REJECTED"</text></outputEntry>
+      </rule>
+
+      <rule id="Rule_OverIndebted">
+        <description>La cuota supera el 40% del ingreso declarado</description>
+        <inputEntry id="Rule3_Score"><text></text></inputEntry>
+        <inputEntry id="Rule3_Defaults"><text></text></inputEntry>
+        <inputEntry id="Rule3_Ratio"><text>&gt; 0.40</text></inputEntry>
+        <outputEntry id="Rule3_Out"><text>"REJECTED"</text></outputEntry>
+      </rule>
+
+      <rule id="Rule_PrimeAutoApprove">
+        <description>Score alto y cuota holgada: aprobacion automatica</description>
+        <inputEntry id="Rule4_Score"><text>&gt;= 750</text></inputEntry>
+        <inputEntry id="Rule4_Defaults"><text>false</text></inputEntry>
+        <inputEntry id="Rule4_Ratio"><text>&lt;= 0.30</text></inputEntry>
+        <outputEntry id="Rule4_Out"><text>"APPROVED"</text></outputEntry>
+      </rule>
+
+      <rule id="Rule_NearPrimeAutoApprove">
+        <description>Score intermedio con cuota conservadora</description>
+        <inputEntry id="Rule5_Score"><text>[650..750)</text></inputEntry>
+        <inputEntry id="Rule5_Defaults"><text>false</text></inputEntry>
+        <inputEntry id="Rule5_Ratio"><text>&lt;= 0.25</text></inputEntry>
+        <outputEntry id="Rule5_Out"><text>"APPROVED"</text></outputEntry>
+      </rule>
+
+      <rule id="Rule_FallbackManualReview">
+        <description>Zona gris: la decide un analista</description>
+        <inputEntry id="Rule6_Score"><text></text></inputEntry>
+        <inputEntry id="Rule6_Defaults"><text></text></inputEntry>
+        <inputEntry id="Rule6_Ratio"><text></text></inputEntry>
+        <outputEntry id="Rule6_Out"><text>"MANUAL_REVIEW"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+
+  <dmndi:DMNDI>
+    <dmndi:DMNDiagram id="DMNDiagram_CreditScoring">
+      <dmndi:DMNShape id="DMNShape_credit_scoring" dmnElementRef="credit_scoring">
+        <dc:Bounds height="80" width="180" x="160" y="100" />
+      </dmndi:DMNShape>
+    </dmndi:DMNDiagram>
+  </dmndi:DMNDI>
+</definitions>

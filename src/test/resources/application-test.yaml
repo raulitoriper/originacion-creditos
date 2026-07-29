@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:originacion;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      # En el test manda Hibernate. Flyway usa sintaxis de Postgres y no es lo que queremos
+      # ejercitar aca: lo que se prueba es el proceso, no el DDL.
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+
+origination:
+  ledger:
+    disbursement-limit: 150000000
+
+logging:
+  level:
+    io.camunda: WARN
+    org.testcontainers: WARN
+    com.rriveros.origination: INFO
