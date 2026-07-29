@@ -1,0 +1,198 @@
+change_name: fix-process-test-failures
+created: 2026-07-29
+
+session:
+  execution_mode: interactive
+  artifact_store: hybrid
+  delivery_strategy: ask-always
+  review_budget_lines: 400
+
+phases:
+  explore: done
+  proposal: done
+  specs: done
+  design: done
+  tasks: done
+  apply: fase_a_done # fase B contingente, no se puede escribir hasta leer el volcado
+  verify: pending
+  archive: pending
+
+apply_fase_a:
+  tareas: 4/13 (1.1, 1.2, 1.3, 2.1)
+  archivos:
+    - src/test/java/com/rriveros/origination/support/ProcessDiagnostics.java (nuevo, 199 lineas)
+    - src/test/java/com/rriveros/origination/CreditOriginationProcessTest.java (+59/-7)
+    - src/test/resources/application-test.yaml (+3/-1)
+  lineas_reales: 269 # sobre el pronostico de ~153, pero holgado bajo el presupuesto de 400
+  compile_gate: BUILD SUCCESS, 3 fuentes de test, release 21
+  strict_tdd: no_aplica # la fase A no agrega comportamiento ni aserciones, no hay estado RED que escribir
+  scope_verificado: solo src/test/**, nada en src/main, BPMN, DMN, pom.xml, README ni workflow
+  desviaciones_verificadas_con_javap:
+    - >
+      ProcessInstanceFilter de 8.7.6 NO expone filtro por processInstanceKey ni key. Se comprobo con
+      javap contra el jar. Para INSTANCE se trae la coleccion sin filtrar y se reduce en el cliente por
+      igualdad de key. FlownodeInstanceFilter e IncidentFilter si exponen processInstanceKey, asi que
+      ELEMENTS e INCIDENTS filtran del lado servidor como estaba disenado.
+    - >
+      El accesor real es ProcessInstance.getProcessVersion(), no getProcessDefinitionVersion(). La
+      etiqueta del volcado se mantiene como processDefinitionVersion= para respetar el formato de salida.
+  inconsistencia_resuelta_por_orquestador: >
+    El spec exigia literalmente logging.level.io.camunda: DEBUG y el design lo refino a WARN mas dos
+    overrides acotados, porque JobPoller emite DEBUG en cada poll de cada uno de los 7 workers y
+    sepultaria el volcado. Se implemento la version del design y se ACTUALIZO el spec para que el
+    contrato coincida con lo entregado, en lugar de dejar a sdd-verify fallando contra texto viejo.
+  niveles_de_log_finales:
+    io.camunda: WARN
+    io.camunda.process.test: DEBUG
+    io.camunda.zeebe.spring.client.jobhandling: DEBUG
+
+next_recommended: sdd-spec y sdd-design (pueden correr en paralelo)
+
+origin:
+  trigger: primer run de CI de la historia del proyecto
+  run: https://github.com/raulitoriper/originacion-creditos/actions/runs/30454853341
+  commit: 75e3776
+  result: 58 tests corridos, 2 fallas, BUILD FAILURE
+  not_infrastructure: >
+    Testcontainers levantó Zeebe y Elasticsearch correctamente y 2 de los 4 tests de proceso
+    PASARON (rechaza_cuando_hay_mora_vigente, escala_al_supervisor_cuando_vence_el_sla_de_revision).
+    El Docker 28.0.4 del runner funcionó. Son defectos reales, no del entorno.
+
+failures:
+  - test: aprueba_y_desembolsa_cuando_el_score_es_alto
+    location: CreditOriginationProcessTest.java:94
+    completados: [Event_SignatureReceived, Activity_ReserveFunds, Activity_DisburseLoan, Activity_NotifyApproval]
+    no_activados: [EndEvent_Disbursed]
+    severidad: menor
+    nota: la correlación del mensaje de firma FUNCIONA; falta solo el end event
+  - test: compensa_la_reserva_cuando_el_desembolso_es_rechazado
+    location: CreditOriginationProcessTest.java:138
+    completados: [Activity_ReserveFunds]
+    no_activados: [Event_CompensateOrigination, Activity_ReleaseFunds, EndEvent_DisbursementFailed]
+    severidad: grave
+    nota: >
+      La compensación de saga no se disparó en absoluto. Es la capacidad que el README usa como
+      tesis central del proyecto.
+
+log_clue: "java.lang.IllegalArgumentException: No existe la solicitud 789bd3e4-a4af-4c0f-b095-5e66b8b36bf5"
+
+hypotheses_unproven:
+  - >
+    H1: el DisbursementWorker falló con excepción técnica en lugar de lanzar el BPMN error
+    DISBURSEMENT_FAILED. Zeebe trata la excepción técnica como fallo reintentable, no como error de
+    negocio, así que el boundary event nunca se activó. El README destaca este archivo justamente por
+    esa distinción.
+  - >
+    H2: la doble escritura ya documentada como límite conocido. SubmitCreditApplicationService guarda
+    el agregado y arranca la instancia en la MISMA transacción, así que Zeebe puede activar un job y
+    un worker leer el agregado ANTES del commit, produciendo «No existe la solicitud». Nunca se
+    manifestó porque estos tests nunca corrieron.
+  - >
+    H3: falla 1 es una carrera entre la aserción y la llegada del token al end event, no un defecto
+    del modelo.
+
+determinism_experiment:
+  run: https://github.com/raulitoriper/originacion-creditos/actions/runs/30454853341
+  attempt: 2
+  commit: 75e3776 # mismo commit, sin cambio de codigo
+  result: conclusion=failure, 58 tests, 2 fallas, identicas elemento por elemento
+  duracion_process_test: 227,5 s (vs 222,7 s del attempt 1)
+  veredicto: >
+    DETERMINISTA. La hipotesis del exportador de Elasticsearch INTERMITENTE queda REFUTADA:
+    una reproduccion bit por bit en dos corridas independientes no es firma de carrera ni de lag
+    intermitente. Sigue ABIERTA una brecha de observacion SISTEMATICA, que el determinismo no
+    descarta.
+  hechos_probados:
+    - >
+      isCompleted() PASA en las dos fallas. El stack trace salta en
+      ElementAssertj.hasCompletedElements (linea 71), posterior a isCompleted() en la cadena.
+      La instancia COMPLETA pero el end event final se reporta como not activated.
+    - >
+      Los end events SI son observables: el test que pasa (rechaza_cuando_hay_mora_vigente)
+      aserta hasCompletedElements("Activity_NotifyRejection", "EndEvent_Rejected") y pasa.
+      No es una limitacion general de la API de aserciones.
+    - >
+      Factor comun de las dos fallas: la firma digital. Los 2 tests que fallan llaman
+      signApplication.sign(applicationId); los 2 que pasan no. En la falla 1
+      Event_SignatureReceived SI completo, asi que la correlacion del mensaje ocurre y el
+      problema esta aguas abajo.
+    - >
+      En ambas fallas los elementos ausentes son exactamente un SUFIJO del camino esperado
+      (el ultimo en la falla 1, los ultimos tres en la falla 2). Senal, no conclusion.
+  nota_hipotesis: >
+    H1 y H2 siguen sin probar. H3 (carrera entre la asercion y la llegada del token) queda
+    debilitada como CARRERA, pero su variante determinista —ventana de observacion truncada de
+    forma sistematica— sigue viva.
+
+proposal_decision:
+  estrategia: diagnostico primero, correccion contingente
+  fase_a: >
+    Instrumentacion en test scope que volca el estado real observado (element instances con
+    estado y timestamp, incidentes, end event de salida, processDefinitionVersion, variables,
+    estado del agregado) y sube io.camunda a DEBUG en el perfil de test. Se entrega sola y
+    DEBE seguir fallando: un verde en fase A significaria que se altero lo medido.
+  fase_b: >
+    Area del fix definida por la tabla de decision del proposal, con la salida del run de la
+    fase A. PR separado por secuencia, no solo por tamano.
+  defecto_latente_disbursement_worker: >
+    Diferido. Entra en fase B solo si el volcado muestra un incidente tecnico en disburse-loan;
+    en caso contrario pasa a un cambio de seguimiento propio. Motivo: cambiar comportamiento en
+    el mismo run en que se mide destruye la atribucion del resultado.
+  deploy_models_verificado: >
+    No hay configuracion de despliegue en src/main/resources, asi que @BeforeEach deployModels()
+    es la unica via de despliegue y NO debe eliminarse. Zeebe deduplica recursos identicos por
+    checksum, por lo que no se espera proliferacion de versiones. Se confirma imprimiendo
+    processDefinitionVersion en el volcado, sin costar un run extra.
+  pronostico_lineas:
+    fase_a: ~150 # ProcessDiagnostics ~110, CreditOriginationProcessTest ~35, application-test.yaml ~4
+    fase_b: 40-200 # contingente
+    presupuesto: 400
+    riesgo_fase_a: bajo
+    nota: >
+      Fase A y fase B deben ir en PRs separados. Un unico PR con A+B pasa a riesgo medio/alto y
+      la decision es del usuario.
+
+review_workload_guard:
+  total_tareas: 13
+  fases: 5
+  fase_a: 3 tareas, ~153 lineas (ProcessDiagnostics ~120, test ~30, YAML ~3), riesgo bajo
+  fase_b: 7 tareas en dos PRs secuenciales, contingente
+  presupuesto: 400
+  decision_needed_before_apply: true
+  motivo: >
+    No es por tamano: el riesgo de presupuesto es bajo. Es por encadenamiento. La fase B no se puede
+    ESCRIBIR hasta leer la corrida de CI de la fase A, asi que la division es por evidencia y no por
+    presupuesto. Con delivery_strategy ask-always eso exige confirmacion explicita de chain_strategy.
+  hallazgos_api_verificados:
+    - VariableQuery y search.response.Variable NO existen en zeebe-client-java-8.7.6.jar
+    - trampa de compilacion, el query es FlownodeInstanceQuery pero la respuesta es FlowNodeInstance
+    - CPT 8.7.6 ya trae CamundaProcessTestResultPrinter y CamundaProcessTestResultCollector, cuyo
+      listener vive en el paquete api, por lo que logging.level.io.camunda WARN suprime su salida
+    - los nombres de metodo viven en el pool de constantes deflactado y quedan sin verificar;
+      mvn -B test-compile es el gate obligatorio antes de gastar una corrida de CI
+  correccion_al_proposal: >
+    Los stack traces de Elasticsearch y las lineas io.camunda.operate.zeebeimport del log vienen de
+    ADENTRO del contenedor (Operate no esta en el classpath) y Testcontainers los stremea como texto
+    plano. El WARN nunca los suprimio: solo afecta loggers del lado cliente.
+
+decisiones_del_usuario_2026_07_29:
+  diagnostico_primero: true # acepta gastar una corrida de CI en un diagnostico que no arregla nada
+  fase_a_debe_seguir_fallando: true # un verde en fase A significaria que se altero lo medido
+  si_el_defecto_esta_en_la_observacion: ajustar_el_test
+  nota_observacion: >
+    Si el volcado muestra que el modelo y los workers hacen lo correcto y el problema es como observa
+    el test, se ajusta la observacion del test: mismos ids, misma severidad de asercion, solo como y
+    cuando observa. Deformar el BPMN para complacer una asercion queda descartado.
+  catch_angosto_disbursement_worker: diferir_a_cambio_propio
+  nota_catch: >
+    Entra en fase B solo si el volcado muestra un incidente tecnico en disburse-loan. Si no, va a su
+    propio cambio de seguimiento. Motivo: mantener limpia la atribucion del experimento.
+  volcado_en_log_alcanza: true # decidido por el orquestador; no se toca el workflow, queda fuera de alcance
+
+prohibido:
+  - continue-on-error en el workflow
+  - exclusiones -Dtest= para forzar verde
+  - tocar la fila «Tests de proceso ejecutados» del README antes de un run verde real
+
+blocked_downstream:
+  - ci-and-domain-tests fase 5 (README y badge) sigue bloqueada hasta que este cambio produzca verde

@@ -13,15 +13,20 @@ import com.rriveros.origination.domain.port.in.SignApplicationUseCase;
 import com.rriveros.origination.domain.port.in.SubmitCreditApplicationUseCase;
 import com.rriveros.origination.domain.port.in.SubmitCreditApplicationUseCase.SubmitCommand;
 import com.rriveros.origination.domain.port.out.CreditBureauGateway;
+import com.rriveros.origination.support.ProcessDiagnostics;
 import io.camunda.process.test.api.CamundaAssert;
 import io.camunda.process.test.api.CamundaProcessTestContext;
 import io.camunda.process.test.api.CamundaSpringProcessTest;
 import io.camunda.zeebe.client.ZeebeClient;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -63,6 +68,10 @@ class CreditOriginationProcessTest {
     @MockitoBean
     private CreditBureauGateway bureau;
 
+    // Instancias observadas por processInstanceKeyOf() en el test en curso. Alimenta el volcado
+    // diagnostico de Fase A; no participa de ninguna asercion.
+    private final List<ObservedInstance> observedInstances = new ArrayList<>();
+
     @BeforeEach
     void deployModels() {
         zeebeClient.newDeployResourceCommand()
@@ -70,6 +79,22 @@ class CreditOriginationProcessTest {
                 .addResourceFromClasspath(DMN_RESOURCE)
                 .send()
                 .join();
+    }
+
+    // Fase A (fix-process-test-failures): volcado diagnostico de solo lectura, corre aun cuando
+    // el metodo de test ya lanzo una AssertionError. No cambia ni un id ni una asercion existente.
+    @AfterEach
+    void dumpDiagnostics(TestInfo testInfo) {
+        for (ObservedInstance observed : observedInstances) {
+            CreditApplication aggregate =
+                    findApplication.findById(observed.applicationId()).orElse(null);
+            ProcessDiagnostics.dump(
+                    zeebeClient,
+                    testInfo,
+                    observed.processInstanceKey(),
+                    observed.expectedElementIds(),
+                    aggregate);
+        }
     }
 
     @Test
@@ -80,7 +105,15 @@ class CreditOriginationProcessTest {
         // cuota 30.000.000/24 = 1.250.000 sobre ingreso 12.000.000 -> ratio 0.1042
         // score 820 >= 750 y ratio <= 0.30 -> Rule_PrimeAutoApprove -> APPROVED
         String applicationId = submit("4501234", new BigDecimal("12000000"), new BigDecimal("30000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId,
+                "Activity_QueryBureau",
+                "Activity_ScoreApplicant",
+                "Event_SignatureReceived",
+                "Activity_ReserveFunds",
+                "Activity_DisburseLoan",
+                "Activity_NotifyApproval",
+                "EndEvent_Disbursed");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .hasCompletedElements("Activity_QueryBureau", "Activity_ScoreApplicant")
@@ -109,7 +142,8 @@ class CreditOriginationProcessTest {
         givenBureauReport(700, true);
 
         String applicationId = submit("4507771", new BigDecimal("12000000"), new BigDecimal("20000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey =
+                processInstanceKeyOf(applicationId, "Activity_NotifyRejection", "EndEvent_Rejected");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .isCompleted()
@@ -128,7 +162,14 @@ class CreditOriginationProcessTest {
         // 160.000.000 supera el limite del ledger (150.000.000) -> DISBURSEMENT_FAILED
         // cuota 6.666.666,67 sobre ingreso 30.000.000 -> ratio 0.2222, entra por APPROVED
         String applicationId = submit("4509991", new BigDecimal("30000000"), new BigDecimal("160000000"), 24);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId,
+                "Activity_ScoreApplicant",
+                "Activity_ReserveFunds",
+                "Activity_DisburseLoan",
+                "Event_CompensateOrigination",
+                "Activity_ReleaseFunds",
+                "EndEvent_DisbursementFailed");
 
         CamundaAssert.assertThat(byKey(processInstanceKey)).hasCompletedElements("Activity_ScoreApplicant");
         signApplication.sign(applicationId);
@@ -155,7 +196,8 @@ class CreditOriginationProcessTest {
 
         // score 600: no llega a ninguna regla de aprobacion automatica -> MANUAL_REVIEW
         String applicationId = submit("4503331", new BigDecimal("12000000"), new BigDecimal("20000000"), 36);
-        long processInstanceKey = processInstanceKeyOf(applicationId);
+        long processInstanceKey = processInstanceKeyOf(
+                applicationId, "Activity_ManualReview", "Activity_EscalateReview", "EndEvent_Escalated");
 
         CamundaAssert.assertThat(byKey(processInstanceKey))
                 .hasVariable("riskDecision", "MANUAL_REVIEW")
@@ -184,11 +226,19 @@ class CreditOriginationProcessTest {
                 document, "Solicitante de prueba", monthlyIncome, requestedAmount, termMonths));
     }
 
-    private long processInstanceKeyOf(String applicationId) {
-        return reload(applicationId).processInstanceKey();
+    private long processInstanceKeyOf(String applicationId, String... expectedElementIds) {
+        long processInstanceKey = reload(applicationId).processInstanceKey();
+        observedInstances.add(
+                new ObservedInstance(processInstanceKey, applicationId, List.of(expectedElementIds)));
+        return processInstanceKey;
     }
 
     private CreditApplication reload(String applicationId) {
         return findApplication.findById(applicationId).orElseThrow();
     }
+
+    // Registro minimo para el volcado diagnostico de Fase A: la key ya se resuelve en
+    // processInstanceKeyOf(), y el agregado se recarga por applicationId dentro de @AfterEach.
+    private record ObservedInstance(
+            long processInstanceKey, String applicationId, List<String> expectedElementIds) {}
 }
